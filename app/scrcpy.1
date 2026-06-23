@@ -110,6 +110,14 @@ Select the device camera by its facing direction.
 Possible values are "front", "back" and "external".
 
 .TP
+.BI "\-\-camera\-focus\-distance " value
+Set a manual camera focus distance, expressed in diopters (1/meters): 0 focuses at infinity, higher values focus closer (e.g. 5 focuses at 0.2m).
+
+This implies disabling autofocus.
+
+Only cameras with a controllable lens support it (a fixed-focus camera ignores it).
+
+.TP
 .BI "\-\-camera\-fps " fps
 Specify the camera capture frame rate.
 
@@ -353,6 +361,12 @@ Disable audio forwarding.
 .TP
 .B \-\-no\-audio\-playback
 Disable audio playback on the computer.
+
+.TP
+.B \-\-no\-camera\-autofocus
+Disable camera autofocus.
+
+The focus is locked, so it does not follow the scene. Combine with \fB\-\-camera\-focus\-distance\fR to lock to a specific distance.
 
 .TP
 .B \-\-no\-cleanup

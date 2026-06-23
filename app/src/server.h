@@ -35,6 +35,7 @@ struct sc_server_params {
     const char *camera_id;
     const char *camera_size;
     const char *camera_ar;
+    const char *camera_focus_distance; // float to be parsed by the server
     uint16_t camera_fps;
     struct sc_port_range port_range;
     uint32_t tunnel_host;
@@ -68,6 +69,7 @@ struct sc_server_params {
     bool power_on;
     bool kill_adb_on_close;
     bool camera_high_speed;
+    bool camera_no_autofocus;
     bool vd_destroy_content;
     bool vd_system_decorations;
     uint8_t list;

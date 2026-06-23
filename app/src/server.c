@@ -351,11 +351,18 @@ execute_server(struct sc_server *server,
         VALIDATE_STRING(params->camera_ar);
         ADD_PARAM("camera_ar=%s", params->camera_ar);
     }
+    if (params->camera_focus_distance) {
+        VALIDATE_STRING(params->camera_focus_distance);
+        ADD_PARAM("camera_focus_distance=%s", params->camera_focus_distance);
+    }
     if (params->camera_fps) {
         ADD_PARAM("camera_fps=%" PRIu16, params->camera_fps);
     }
     if (params->camera_high_speed) {
         ADD_PARAM("camera_high_speed=true");
+    }
+    if (params->camera_no_autofocus) {
+        ADD_PARAM("camera_no_autofocus=true");
     }
     if (params->show_touches) {
         ADD_PARAM("show_touches=true");

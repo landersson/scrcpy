@@ -133,6 +133,29 @@ scrcpy --video-source=camera --camera-fps=60
 ```
 
 
+## Focus
+
+By default, the camera uses continuous autofocus, which may "hunt" (refocus
+while recording) and momentarily change the image. To disable autofocus and lock
+the focus:
+
+```
+scrcpy --video-source=camera --no-camera-autofocus
+```
+
+To set a specific manual focus distance, expressed in diopters (1/meters),
+use `--camera-focus-distance` (this implies `--no-camera-autofocus`):
+
+```bash
+scrcpy --video-source=camera --camera-focus-distance=0    # focus at infinity
+scrcpy --video-source=camera --camera-focus-distance=5    # focus at 0.2m (1/5)
+```
+
+These options require a camera with a controllable lens. A fixed-focus camera
+(or a device that does not support disabling autofocus) ignores them and logs a
+warning.
+
+
 ## High speed capture
 
 The Android camera API also supports a [high speed capture mode][high speed].
