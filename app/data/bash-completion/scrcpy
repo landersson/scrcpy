@@ -16,6 +16,7 @@ _scrcpy() {
         --camera-ar=
         --camera-id=
         --camera-facing=
+        --camera-focus-distance=
         --camera-fps=
         --camera-high-speed
         --camera-size=
@@ -57,6 +58,7 @@ _scrcpy() {
         --new-display=
         --no-audio
         --no-audio-playback
+        --no-camera-autofocus
         --no-cleanup
         --no-clipboard-autosync
         --no-downsize-on-error
@@ -214,6 +216,7 @@ _scrcpy() {
         |--background-color \
         |--camera-ar \
         |--camera-id \
+        |--camera-focus-distance \
         |--camera-fps \
         |--camera-size \
         |--camera-torch \

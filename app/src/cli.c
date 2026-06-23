@@ -81,8 +81,10 @@ enum {
     OPT_CAMERA_SIZE,
     OPT_CAMERA_FACING,
     OPT_CAMERA_AR,
+    OPT_CAMERA_FOCUS_DISTANCE,
     OPT_CAMERA_FPS,
     OPT_CAMERA_HIGH_SPEED,
+    OPT_NO_CAMERA_AUTOFOCUS,
     OPT_DISPLAY_ORIENTATION,
     OPT_RECORD_ORIENTATION,
     OPT_ORIENTATION,
@@ -281,6 +283,17 @@ static const struct sc_option options[] = {
         .argdesc = "facing",
         .text = "Select the device camera by its facing direction.\n"
                 "Possible values are \"front\", \"back\" and \"external\".",
+    },
+    {
+        .longopt_id = OPT_CAMERA_FOCUS_DISTANCE,
+        .longopt = "camera-focus-distance",
+        .argdesc = "value",
+        .text = "Set a manual camera focus distance, expressed in diopters "
+                "(1/meters): 0 focuses at infinity, higher values focus closer "
+                "(e.g. 5 focuses at 0.2m).\n"
+                "This implies disabling autofocus.\n"
+                "Only cameras with a controllable lens support it (a fixed-"
+                "focus camera ignores it).",
     },
     {
         .longopt_id = OPT_CAMERA_FPS,
@@ -620,6 +633,13 @@ static const struct sc_option options[] = {
         .longopt_id = OPT_NO_AUDIO_PLAYBACK,
         .longopt = "no-audio-playback",
         .text = "Disable audio playback on the computer.",
+    },
+    {
+        .longopt_id = OPT_NO_CAMERA_AUTOFOCUS,
+        .longopt = "no-camera-autofocus",
+        .text = "Disable camera autofocus.\n"
+                "The focus is locked, so it does not follow the scene. Combine "
+                "with --camera-focus-distance to lock to a specific distance.",
     },
     {
         .longopt_id = OPT_NO_CLEANUP,
@@ -2859,6 +2879,9 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
                     return false;
                 }
                 break;
+            case OPT_CAMERA_FOCUS_DISTANCE:
+                opts->camera_focus_distance = optarg;
+                break;
             case OPT_CAMERA_FPS:
                 if (!parse_camera_fps(optarg, &opts->camera_fps)) {
                     return false;
@@ -2872,6 +2895,9 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
                 break;
             case OPT_CAMERA_ZOOM:
                 opts->camera_zoom = optarg;
+                break;
+            case OPT_NO_CAMERA_AUTOFOCUS:
+                opts->camera_no_autofocus = true;
                 break;
             case OPT_NO_WINDOW:
                 opts->window = false;
@@ -3251,6 +3277,8 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
             || opts->camera_facing != SC_CAMERA_FACING_ANY
             || opts->camera_fps
             || opts->camera_high_speed
+            || opts->camera_no_autofocus
+            || opts->camera_focus_distance
             || opts->camera_size) {
         LOGE("Camera options are only available with --video-source=camera");
         return false;

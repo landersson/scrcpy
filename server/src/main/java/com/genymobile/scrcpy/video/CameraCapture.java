@@ -23,6 +23,7 @@ import android.hardware.camera2.CameraCharacteristics;
 import android.hardware.camera2.CameraConstrainedHighSpeedCaptureSession;
 import android.hardware.camera2.CameraDevice;
 import android.hardware.camera2.CameraManager;
+import android.hardware.camera2.CameraMetadata;
 import android.hardware.camera2.CaptureFailure;
 import android.hardware.camera2.CaptureRequest;
 import android.hardware.camera2.params.OutputConfiguration;
@@ -62,6 +63,8 @@ public class CameraCapture extends SurfaceCapture {
     private final CameraAspectRatio aspectRatio;
     private final int fps;
     private final boolean highSpeed;
+    private final boolean noAutofocus;
+    private final float focusDistance;
     private final Rect crop;
     private final Orientation captureOrientation;
     private final float angle;
@@ -97,6 +100,8 @@ public class CameraCapture extends SurfaceCapture {
         this.aspectRatio = options.getCameraAspectRatio();
         this.fps = options.getCameraFps();
         this.highSpeed = options.getCameraHighSpeed();
+        this.noAutofocus = options.getCameraNoAutofocus();
+        this.focusDistance = options.getCameraFocusDistance();
         this.crop = options.getCrop();
         this.captureOrientation = options.getCaptureOrientation();
         assert captureOrientation != null;
@@ -303,8 +308,9 @@ public class CameraCapture extends SurfaceCapture {
                 }
 
                 CameraManager cameraManager = ServiceManager.getCameraManager();
+                CameraCharacteristics characteristics = null;
                 try {
-                    CameraCharacteristics characteristics = cameraManager.getCameraCharacteristics(cameraId);
+                    characteristics = cameraManager.getCameraCharacteristics(cameraId);
                     zoomRange = characteristics.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE);
                 } catch (CameraAccessException e) {
                     Ln.w("Could not get camera characteristics");
@@ -325,6 +331,13 @@ public class CameraCapture extends SurfaceCapture {
                         zoom = clampZoom(zoom);
                         Ln.i("Set camera zoom: " + zoom);
                         requestBuilder.set(CaptureRequest.CONTROL_ZOOM_RATIO, zoom);
+                    }
+                    if (noAutofocus || !Float.isNaN(focusDistance)) {
+                        if (characteristics != null) {
+                            configureManualFocus(requestBuilder, characteristics);
+                        } else {
+                            Ln.w("Camera characteristics unavailable; ignoring --no-camera-autofocus/--camera-focus-distance");
+                        }
                     }
 
                     CaptureRequest request = requestBuilder.build();
@@ -523,6 +536,54 @@ public class CameraCapture extends SurfaceCapture {
         }
 
         return zoomRange.clamp(value);
+    }
+
+    private void configureManualFocus(CaptureRequest.Builder requestBuilder, CameraCharacteristics characteristics) {
+        assertCameraThread();
+        if (highSpeed) {
+            // Constrained high-speed sessions only accept a restricted set of capture keys
+            Ln.w("Manual focus is not supported in high-speed capture mode; ignoring");
+            return;
+        }
+
+        int[] afModes = characteristics.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES);
+        boolean afOffSupported = false;
+        if (afModes != null) {
+            for (int mode : afModes) {
+                if (mode == CameraMetadata.CONTROL_AF_MODE_OFF) {
+                    afOffSupported = true;
+                    break;
+                }
+            }
+        }
+
+        if (!afOffSupported) {
+            Ln.w("Camera '" + cameraId + "' does not support disabling autofocus; ignoring "
+                    + "--no-camera-autofocus/--camera-focus-distance");
+            return;
+        }
+
+        requestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF);
+        Ln.i("Camera autofocus disabled");
+
+        if (!Float.isNaN(focusDistance)) {
+            Float minFocusDistance = characteristics.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE);
+            if (minFocusDistance == null || minFocusDistance == 0) {
+                // 0 (or unavailable) means the lens is fixed-focus: LENS_FOCUS_DISTANCE cannot be set
+                Ln.w("Camera '" + cameraId + "' has a fixed-focus lens; --camera-focus-distance ignored");
+            } else {
+                float clamped = focusDistance;
+                if (clamped < 0) {
+                    clamped = 0;
+                } else if (clamped > minFocusDistance) {
+                    Ln.w("Requested focus distance " + focusDistance + " exceeds the closest focus distance "
+                            + minFocusDistance + "; clamping");
+                    clamped = minFocusDistance;
+                }
+                requestBuilder.set(CaptureRequest.LENS_FOCUS_DISTANCE, clamped);
+                Ln.i("Camera focus distance set to " + clamped + " diopters");
+            }
+        }
     }
 
     private void assertCameraThread() {

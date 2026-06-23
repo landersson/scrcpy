@@ -251,6 +251,7 @@ struct scrcpy_options {
     const char *camera_size;
     const char *camera_ar;
     const char *camera_zoom;
+    const char *camera_focus_distance; // float to be parsed by the server
     uint16_t camera_fps;
     enum sc_log_level log_level;
     enum sc_codec video_codec;
@@ -328,6 +329,7 @@ struct scrcpy_options {
     bool require_audio;
     bool kill_adb_on_close;
     bool camera_high_speed;
+    bool camera_no_autofocus;
 #define SC_OPTION_LIST_ENCODERS 0x1
 #define SC_OPTION_LIST_DISPLAYS 0x2
 #define SC_OPTION_LIST_CAMERAS 0x4
