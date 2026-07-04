@@ -254,6 +254,15 @@ run_demuxer(void *data) {
         codec_ctx->height = session_data.video.height;
         codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
 
+        // High-resolution/high-bitrate camera streams (12MP@30 h265) cannot
+        // be decoded in real time on a single thread; a stalled decoder
+        // backpressures the device and makes the encoder drop frames,
+        // which also corrupts --record output. Frame threading needs the
+        // low-delay flag cleared; the added latency (a few frames) does
+        // not matter for this rig's preview.
+        codec_ctx->flags &= ~AV_CODEC_FLAG_LOW_DELAY;
+        codec_ctx->thread_count = 0;  // auto: one per core
+        codec_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
     } else {
         // Hardcoded audio properties
 #ifdef SCRCPY_LAVU_HAS_CHLAYOUT
