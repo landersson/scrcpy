@@ -84,15 +84,25 @@ public final class StillServer {
     private static int probe(String cameraId) throws Exception {
         CameraManager manager = ServiceManager.getCameraManager();
         String[] ids = cameraId != null ? new String[] {cameraId} : manager.getCameraIdList();
+        int status = 0;
         for (String id : ids) {
             try {
                 Protocol.send(CameraProbe.describe(id, manager.getCameraCharacteristics(id)));
             } catch (IllegalArgumentException e) {
-                Protocol.error(null, "config_unsupported", "camera " + id + " not found", true);
-                return EXIT_USAGE;
+                Protocol.error(null, "config_unsupported", "camera " + id + " not found", false);
+                status = EXIT_USAGE;
+            } catch (RuntimeException e) { // a HAL leaving out a characteristic; the other cameras still count
+                Protocol.error(null, "internal", "camera " + id + ": " + describe(e), false);
+                status = 1;
             }
         }
-        return 0;
+        return status;
+    }
+
+    /** An exception and the line it was thrown from, for the host's error message. */
+    static String describe(Throwable t) {
+        StackTraceElement[] trace = t.getStackTrace();
+        return t + (trace.length > 0 ? " at " + trace[0] : "");
     }
 
     private static int serve(int idleTimeoutS) throws IOException {
@@ -184,7 +194,7 @@ public final class StillServer {
             Protocol.error(id, "bad_command", "bad command: " + e.getMessage(), false);
             return session;
         } catch (RuntimeException e) {
-            Protocol.error(id, "internal", String.valueOf(e), false);
+            Protocol.error(id, "internal", describe(e), false);
             return session;
         }
     }
