@@ -1,0 +1,728 @@
+package com.genymobile.scrcpy.still;
+
+import com.genymobile.scrcpy.AndroidVersions;
+import com.genymobile.scrcpy.util.HandlerExecutor;
+import com.genymobile.scrcpy.wrappers.ServiceManager;
+
+import android.annotation.SuppressLint;
+import android.annotation.TargetApi;
+import android.graphics.ImageFormat;
+import android.hardware.camera2.CameraAccessException;
+import android.hardware.camera2.CameraCaptureSession;
+import android.hardware.camera2.CameraCharacteristics;
+import android.hardware.camera2.CameraDevice;
+import android.hardware.camera2.CameraManager;
+import android.hardware.camera2.CameraMetadata;
+import android.hardware.camera2.CaptureFailure;
+import android.hardware.camera2.CaptureRequest;
+import android.hardware.camera2.CaptureResult;
+import android.hardware.camera2.TotalCaptureResult;
+import android.hardware.camera2.params.OutputConfiguration;
+import android.hardware.camera2.params.RggbChannelVector;
+import android.hardware.camera2.params.SessionConfiguration;
+import android.hardware.camera2.params.StreamConfigurationMap;
+import android.media.Image;
+import android.media.ImageReader;
+import android.os.Handler;
+import android.os.HandlerThread;
+import android.os.SystemClock;
+import android.util.Range;
+import android.util.Size;
+import android.view.Surface;
+import org.json.JSONObject;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+
+/**
+ * One opened camera for still shots. A small YUV stream keeps 3A running with the requested focus (and, once locked, holds the AE/AWB
+ * lock); each shot is a single STILL_CAPTURE request to a JPEG stream at the largest size, written to a file on the phone.
+ * <p>
+ * Commands run on the caller's thread and block; camera callbacks run on the session's own handler thread.
+ */
+@TargetApi(AndroidVersions.API_29_ANDROID_10)
+final class StillSession implements AutoCloseable {
+
+    private static final String TAG_CONVERGE = "converge";
+    private static final String TAG_LOCK = "lock";
+    private static final int OPEN_RETRY_MS = 300;
+    private static final int SKIP_FRAMES = 2;
+    private static final int CONVERGED_FRAMES = 3;
+    private static final int LOCK_TIMEOUT_MS = 1500;
+    private static final int LOCKED_FRAMES = 2;
+
+    static final class Options {
+        String cameraId = "0";
+        float focusDistance = Float.NaN; // diopters; NaN: none requested
+        boolean afOff; // autofocus off even without a distance
+        boolean lock = true; // lock AE/AWB once converged
+        int warmupMs;
+        int convergeTimeoutMs = 3000;
+        int openTimeoutMs = 8000;
+        int shotTimeoutMs = 10000;
+        String dir = "/data/local/tmp/phonecap-stills";
+        String jpegSize = "max";
+        String fpsRange = "lowest";
+
+        static Options fromJson(JSONObject j) {
+            Options o = new Options();
+            o.cameraId = j.optString("camera_id", o.cameraId);
+            if (j.has("focus_distance") && !j.isNull("focus_distance")) {
+                o.focusDistance = (float) j.optDouble("focus_distance", Double.NaN);
+            }
+            o.afOff = j.optBoolean("af_off", o.afOff);
+            o.lock = j.optBoolean("lock", o.lock);
+            o.warmupMs = j.optInt("warmup_ms", o.warmupMs);
+            o.convergeTimeoutMs = j.optInt("converge_timeout_ms", o.convergeTimeoutMs);
+            o.openTimeoutMs = j.optInt("open_timeout_ms", o.openTimeoutMs);
+            o.shotTimeoutMs = j.optInt("shot_timeout_ms", o.shotTimeoutMs);
+            o.dir = j.optString("dir", o.dir);
+            o.jpegSize = j.optString("jpeg_size", o.jpegSize);
+            o.fpsRange = j.optString("fps_range", o.fpsRange);
+            return o;
+        }
+    }
+
+    private final Options options;
+    private final BlockingQueue<TotalCaptureResult> results = new ArrayBlockingQueue<>(64);
+    private final BlockingQueue<Image> images = new LinkedBlockingQueue<>();
+    private volatile String deviceError; // set by the device callbacks once the camera is lost
+
+    private HandlerThread thread;
+    private Handler handler;
+    private Executor executor;
+    private CameraCharacteristics characteristics;
+    private boolean afOffSupported;
+    private float focusRequest = Float.NaN; // the clamped LENS_FOCUS_DISTANCE, NaN: not set
+    private Range<Integer> fpsRange;
+    private Size jpegSize;
+    private boolean jpegHighRes;
+    private Size previewSize;
+    private CameraDevice device;
+    private CameraCaptureSession session;
+    private ImageReader jpegReader;
+    private ImageReader previewReader;
+    private boolean converged;
+    private boolean lockConfirmed;
+
+    StillSession(Options options) {
+        this.options = options;
+    }
+
+    /** Open the camera, configure it, let 3A converge and lock; returns the "ready" event (without id). Closes itself on failure. */
+    JSONObject open() throws StillException {
+        long start = SystemClock.elapsedRealtime();
+        try {
+            thread = new HandlerThread("still-camera");
+            thread.start();
+            handler = new Handler(thread.getLooper());
+            executor = new HandlerExecutor(handler);
+
+            CameraManager manager = ServiceManager.getCameraManager();
+            String[] ids = manager.getCameraIdList();
+            if (!Arrays.asList(ids).contains(options.cameraId)) {
+                throw new StillException("config_unsupported", "camera " + options.cameraId + " not found (cameras: " + Arrays.toString(ids) + ")");
+            }
+            characteristics = manager.getCameraCharacteristics(options.cameraId);
+            afOffSupported = CameraProbe.afOffSupported(characteristics);
+            focusRequest = Selection.clampFocus(options.focusDistance, characteristics.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE));
+            fpsRange = CameraProbe.fpsRange(characteristics, options.fpsRange);
+            if (fpsRange == null) {
+                Protocol.log("warn", "no AE fps range matches '" + options.fpsRange + "'; using the template's");
+            }
+            if (!Float.isNaN(options.focusDistance) && !afOffSupported) {
+                Protocol.log("warn", "camera " + options.cameraId + " cannot disable autofocus; focus_distance ignored");
+            }
+
+            long warmupMs = 0;
+            if (options.warmupMs > 0) {
+                // a short throwaway session, closed and reopened: the next one is sharp (docs/findings.md "Camera warmup")
+                long warmupStart = SystemClock.elapsedRealtime();
+                startCamera();
+                SystemClock.sleep(options.warmupMs);
+                closeCamera();
+                warmupMs = SystemClock.elapsedRealtime() - warmupStart;
+            }
+
+            long openStart = SystemClock.elapsedRealtime();
+            startCamera();
+            long openMs = SystemClock.elapsedRealtime() - openStart;
+
+            long convergeStart = SystemClock.elapsedRealtime();
+            TotalCaptureResult last = converge();
+            long convergeMs = SystemClock.elapsedRealtime() - convergeStart;
+            if (options.lock) {
+                last = lock(last);
+            }
+
+            File dir = new File(options.dir);
+            if (!dir.isDirectory() && !dir.mkdirs()) {
+                throw new StillException("io", "cannot create " + dir);
+            }
+
+            JSONObject ready = Protocol.event("ready", null);
+            Protocol.put(ready, "camera_id", options.cameraId);
+            Protocol.put(ready, "hardware_level", CameraProbe.hardwareLevel(characteristics.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL)));
+            Protocol.put(ready, "jpeg_size", CameraProbe.size(jpegSize));
+            Protocol.put(ready, "jpeg_high_res", jpegHighRes);
+            Protocol.put(ready, "preview_size", CameraProbe.size(previewSize));
+            Protocol.put(ready, "fps_range", fpsRange == null ? null : Protocol.array(fpsRange.getLower(), fpsRange.getUpper()));
+            Protocol.put(ready, "af_off_supported", afOffSupported);
+            Protocol.put(ready, "focus_distance_requested", options.focusDistance);
+            Protocol.put(ready, "min_focus_distance", characteristics.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE));
+            Protocol.put(ready, "focus_calibration",
+                    CameraProbe.focusCalibration(characteristics.get(CameraCharacteristics.LENS_INFO_FOCUS_DISTANCE_CALIBRATION)));
+            Protocol.put(ready, "converged", converged);
+            Protocol.put(ready, "converge_ms", convergeMs);
+            Protocol.put(ready, "locked", options.lock);
+            Protocol.put(ready, "lock_confirmed", lockConfirmed);
+            Protocol.put(ready, "warmup_ms", warmupMs);
+            Protocol.put(ready, "open_ms", openMs);
+            Protocol.put(ready, "total_ms", SystemClock.elapsedRealtime() - start);
+            putResult(ready, last);
+            return ready;
+        } catch (StillException e) {
+            close();
+            throw e;
+        } catch (CameraAccessException e) {
+            close();
+            throw new StillException(accessCode(e.getReason()), "camera " + options.cameraId + ": " + e.getMessage(), e);
+        } catch (InterruptedException e) {
+            close();
+            Thread.currentThread().interrupt();
+            throw new StillException("internal", "interrupted", e);
+        } catch (RuntimeException e) {
+            close();
+            throw new StillException("internal", String.valueOf(e), e);
+        }
+    }
+
+    /** Take one still into dir/name.jpg; returns the "shot" event (without id). */
+    JSONObject shoot(String name) throws StillException {
+        if (session == null) {
+            throw new StillException("bad_command", "no camera is open");
+        }
+        if (!Selection.validName(name)) {
+            throw new StillException("bad_command", "bad still name: " + name);
+        }
+        try {
+            checkDevice();
+            drainImages();
+            CaptureRequest.Builder builder = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
+            builder.addTarget(jpegReader.getSurface());
+            apply3A(builder, options.lock);
+            builder.set(CaptureRequest.JPEG_QUALITY, (byte) 100);
+            builder.set(CaptureRequest.JPEG_ORIENTATION, 0);
+            builder.set(CaptureRequest.JPEG_THUMBNAIL_SIZE, new Size(0, 0));
+
+            CompletableFuture<TotalCaptureResult> done = new CompletableFuture<>();
+            long start = SystemClock.elapsedRealtime();
+            session.capture(builder.build(), new CameraCaptureSession.CaptureCallback() {
+                @Override
+                public void onCaptureCompleted(CameraCaptureSession s, CaptureRequest request, TotalCaptureResult result) {
+                    done.complete(result);
+                }
+
+                @Override
+                public void onCaptureFailed(CameraCaptureSession s, CaptureRequest request, CaptureFailure failure) {
+                    done.completeExceptionally(new StillException("capture_failed",
+                            "capture failed (reason " + failure.getReason() + (failure.wasImageCaptured() ? ", image captured" : "") + ")"));
+                }
+
+                @Override
+                public void onCaptureBufferLost(CameraCaptureSession s, CaptureRequest request, Surface target, long frameNumber) {
+                    done.completeExceptionally(new StillException("buffer_lost", "JPEG buffer lost for frame " + frameNumber));
+                }
+            }, handler);
+            TotalCaptureResult result = await(done, options.shotTimeoutMs, "still capture");
+            long captureMs = SystemClock.elapsedRealtime() - start;
+
+            Image image = takeImage(result.get(CaptureResult.SENSOR_TIMESTAMP), start + options.shotTimeoutMs);
+            long writeStart = SystemClock.elapsedRealtime();
+            File file = new File(options.dir, name + ".jpg");
+            int bytes;
+            int width;
+            int height;
+            try {
+                width = image.getWidth();
+                height = image.getHeight();
+                bytes = write(image, file);
+            } finally {
+                image.close();
+            }
+            long now = SystemClock.elapsedRealtime();
+
+            JSONObject shot = Protocol.event("shot", null);
+            Protocol.put(shot, "file", file.getPath());
+            Protocol.put(shot, "width", width);
+            Protocol.put(shot, "height", height);
+            Protocol.put(shot, "bytes", bytes);
+            Protocol.put(shot, "capture_ms", captureMs);
+            Protocol.put(shot, "write_ms", now - writeStart);
+            Protocol.put(shot, "latency_ms", now - start);
+            putResult(shot, result);
+            return shot;
+        } catch (CameraAccessException e) {
+            throw new StillException(accessCode(e.getReason()), "still capture: " + e.getMessage(), e);
+        } catch (IOException e) {
+            throw new StillException("io", "writing " + name + ".jpg: " + e.getMessage(), e);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new StillException("internal", "interrupted", e);
+        } catch (IllegalStateException e) { // session or device closed underneath
+            String lost = deviceError;
+            throw new StillException(lost != null ? "camera_disconnected" : "internal", lost != null ? lost : String.valueOf(e), e);
+        }
+    }
+
+    boolean isOpen() {
+        return session != null;
+    }
+
+    @Override
+    public void close() {
+        closeCamera();
+        if (thread != null) {
+            thread.quitSafely();
+            thread = null;
+        }
+    }
+
+    private void startCamera() throws StillException, CameraAccessException, InterruptedException {
+        openDevice();
+        configure();
+        setRepeating(false);
+    }
+
+    private void closeCamera() {
+        if (session != null) {
+            try {
+                session.stopRepeating();
+            } catch (CameraAccessException | IllegalStateException e) {
+                // closing anyway
+            }
+            session.close();
+            session = null;
+        }
+        if (device != null) {
+            device.close();
+            device = null;
+        }
+        drainImages();
+        if (jpegReader != null) {
+            jpegReader.close();
+            jpegReader = null;
+        }
+        if (previewReader != null) {
+            previewReader.close();
+            previewReader = null;
+        }
+        results.clear();
+    }
+
+    @SuppressLint("MissingPermission")
+    private void openDevice() throws StillException, InterruptedException {
+        long deadline = SystemClock.elapsedRealtime() + options.openTimeoutMs;
+        while (true) {
+            CompletableFuture<CameraDevice> future = new CompletableFuture<>();
+            try {
+                ServiceManager.getCameraManager().openCamera(options.cameraId, new CameraDevice.StateCallback() {
+                    @Override
+                    public void onOpened(CameraDevice camera) {
+                        if (!future.complete(camera)) {
+                            camera.close(); // the command gave up waiting
+                        }
+                    }
+
+                    @Override
+                    public void onDisconnected(CameraDevice camera) {
+                        deviceError = "camera " + options.cameraId + " disconnected";
+                        future.completeExceptionally(new CameraAccessException(CameraAccessException.CAMERA_DISCONNECTED));
+                        camera.close();
+                    }
+
+                    @Override
+                    public void onError(CameraDevice camera, int error) {
+                        deviceError = "camera " + options.cameraId + " device error " + error;
+                        future.completeExceptionally(new CameraAccessException(deviceErrorReason(error)));
+                        camera.close();
+                    }
+                }, handler);
+                long remaining = Math.max(1, deadline - SystemClock.elapsedRealtime());
+                device = future.get(remaining, TimeUnit.MILLISECONDS);
+                deviceError = null;
+                return;
+            } catch (CameraAccessException e) { // thrown by openCamera itself
+                retryOrThrow(e, deadline);
+            } catch (ExecutionException e) {
+                Throwable cause = e.getCause();
+                if (!(cause instanceof CameraAccessException)) {
+                    throw new StillException("internal", "opening camera " + options.cameraId + ": " + cause, cause);
+                }
+                retryOrThrow((CameraAccessException) cause, deadline);
+            } catch (TimeoutException e) {
+                future.thenAccept(CameraDevice::close);
+                throw new StillException("timeout", "camera " + options.cameraId + " did not open within " + options.openTimeoutMs + " ms");
+            }
+        }
+    }
+
+    /** Wait and return when the camera is only busy (scrcpy has just released it) and time is left; throw otherwise. */
+    private void retryOrThrow(CameraAccessException e, long deadline) throws StillException {
+        int reason = e.getReason();
+        boolean busy = reason == CameraAccessException.CAMERA_IN_USE || reason == CameraAccessException.MAX_CAMERAS_IN_USE;
+        if (!busy || SystemClock.elapsedRealtime() + OPEN_RETRY_MS >= deadline) {
+            throw new StillException(accessCode(reason), "cannot open camera " + options.cameraId + ": " + e.getMessage(), e);
+        }
+        SystemClock.sleep(OPEN_RETRY_MS);
+    }
+
+    private void configure() throws StillException, CameraAccessException, InterruptedException {
+        StreamConfigurationMap map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+        Size[] regular = CameraProbe.outputSizes(map, ImageFormat.JPEG);
+        List<Size> candidates = jpegCandidates(regular, CameraProbe.highResolutionSizes(map, ImageFormat.JPEG));
+        for (int i = 0; i < candidates.size(); ++i) {
+            Size size = candidates.get(i);
+            Size preview = CameraProbe.previewSize(map, size);
+            if (preview == null) {
+                throw new StillException("config_unsupported", "camera " + options.cameraId + " offers no YUV output");
+            }
+            createReaders(size, preview);
+            CompletableFuture<CameraCaptureSession> configured = new CompletableFuture<>();
+            List<OutputConfiguration> outputs = Arrays.asList(new OutputConfiguration(previewReader.getSurface()),
+                    new OutputConfiguration(jpegReader.getSurface()));
+            String description = "JPEG " + size + " + YUV " + preview;
+            SessionConfiguration config = new SessionConfiguration(SessionConfiguration.SESSION_REGULAR, outputs, executor,
+                    new CameraCaptureSession.StateCallback() {
+                        @Override
+                        public void onConfigured(CameraCaptureSession s) {
+                            if (!configured.complete(s)) {
+                                s.close();
+                            }
+                        }
+
+                        @Override
+                        public void onConfigureFailed(CameraCaptureSession s) {
+                            configured.completeExceptionally(new StillException("config_unsupported", "session configuration failed: " + description));
+                        }
+                    });
+            if (!isSupported(config)) {
+                closeReaders();
+                if (i < candidates.size() - 1) {
+                    Protocol.log("info", description + " is not supported; trying a smaller JPEG size");
+                    continue;
+                }
+                throw new StillException("config_unsupported", description + " is not a supported configuration");
+            }
+            device.createCaptureSession(config);
+            session = await(configured, options.openTimeoutMs, "session configuration");
+            jpegSize = size;
+            jpegHighRes = !Arrays.asList(regular).contains(size);
+            previewSize = preview;
+            return;
+        }
+        throw new StillException("config_unsupported", "camera " + options.cameraId + " offers no JPEG output");
+    }
+
+    private List<Size> jpegCandidates(Size[] regular, Size[] highRes) throws StillException {
+        List<Size> candidates = new ArrayList<>();
+        if (!"max".equals(options.jpegSize)) {
+            int[] wh = Selection.parseSize(options.jpegSize);
+            if (wh == null) {
+                throw new StillException("bad_command", "jpeg_size must be \"max\" or WxH, not " + options.jpegSize);
+            }
+            Size wanted = new Size(wh[0], wh[1]);
+            if (!Arrays.asList(regular).contains(wanted) && !Arrays.asList(highRes).contains(wanted)) {
+                throw new StillException("config_unsupported", "camera " + options.cameraId + " offers no JPEG " + wanted);
+            }
+            candidates.add(wanted);
+            return candidates;
+        }
+        Size largestRegular = CameraProbe.largest(regular);
+        Size largestHighRes = CameraProbe.largest(highRes);
+        // high-resolution sizes are outside the guaranteed stream combinations: only tried when larger, and checked first
+        if (largestHighRes != null && (largestRegular == null || area(largestHighRes) > area(largestRegular))) {
+            candidates.add(largestHighRes);
+        }
+        if (largestRegular != null) {
+            candidates.add(largestRegular);
+        }
+        return candidates;
+    }
+
+    private static long area(Size s) {
+        return (long) s.getWidth() * s.getHeight();
+    }
+
+    private boolean isSupported(SessionConfiguration config) throws CameraAccessException {
+        try {
+            return device.isSessionConfigurationSupported(config);
+        } catch (UnsupportedOperationException e) {
+            return true; // the HAL cannot answer: just try it
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+
+    private void createReaders(Size jpeg, Size preview) {
+        jpegReader = ImageReader.newInstance(jpeg.getWidth(), jpeg.getHeight(), ImageFormat.JPEG, 2);
+        jpegReader.setOnImageAvailableListener(reader -> {
+            try {
+                Image image = reader.acquireNextImage();
+                if (image != null) {
+                    images.add(image);
+                }
+            } catch (IllegalStateException e) {
+                Protocol.log("warn", "JPEG image dropped: " + e.getMessage());
+            }
+        }, handler);
+        previewReader = ImageReader.newInstance(preview.getWidth(), preview.getHeight(), ImageFormat.YUV_420_888, 2);
+        previewReader.setOnImageAvailableListener(reader -> {
+            Image image = reader.acquireLatestImage();
+            if (image != null) {
+                image.close();
+            }
+        }, handler);
+    }
+
+    private void closeReaders() {
+        if (jpegReader != null) {
+            jpegReader.close();
+            jpegReader = null;
+        }
+        if (previewReader != null) {
+            previewReader.close();
+            previewReader = null;
+        }
+    }
+
+    private void setRepeating(boolean lock) throws CameraAccessException {
+        CaptureRequest.Builder builder = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+        builder.addTarget(previewReader.getSurface());
+        apply3A(builder, lock);
+        builder.setTag(lock ? TAG_LOCK : TAG_CONVERGE);
+        results.clear();
+        session.setRepeatingRequest(builder.build(), new CameraCaptureSession.CaptureCallback() {
+            @Override
+            public void onCaptureCompleted(CameraCaptureSession s, CaptureRequest request, TotalCaptureResult result) {
+                if (!results.offer(result)) {
+                    results.poll();
+                    results.offer(result);
+                }
+            }
+        }, handler);
+    }
+
+    private void apply3A(CaptureRequest.Builder builder, boolean lock) {
+        builder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO);
+        builder.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON);
+        builder.set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_AUTO);
+        builder.set(CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_OFF);
+        if (fpsRange != null) {
+            builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange);
+        }
+        if (afOffSupported && (options.afOff || !Float.isNaN(options.focusDistance))) {
+            builder.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF);
+            if (!Float.isNaN(focusRequest)) {
+                builder.set(CaptureRequest.LENS_FOCUS_DISTANCE, focusRequest);
+            }
+        } else if (CameraProbe.hasAfMode(characteristics, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)) {
+            builder.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
+        }
+        builder.set(CaptureRequest.CONTROL_AE_LOCK, lock);
+        builder.set(CaptureRequest.CONTROL_AWB_LOCK, lock);
+    }
+
+    /** Wait until lens, AE and AWB report settled on consecutive frames (or the timeout); returns the last result. */
+    private TotalCaptureResult converge() throws StillException, InterruptedException {
+        long deadline = SystemClock.elapsedRealtime() + options.convergeTimeoutMs;
+        int skip = SKIP_FRAMES;
+        int streak = 0;
+        TotalCaptureResult last = null;
+        converged = false;
+        while (true) {
+            long remaining = deadline - SystemClock.elapsedRealtime();
+            TotalCaptureResult r = remaining > 0 ? results.poll(remaining, TimeUnit.MILLISECONDS) : null;
+            checkDevice();
+            if (r == null) {
+                break;
+            }
+            if (!TAG_CONVERGE.equals(r.getRequest().getTag())) {
+                continue;
+            }
+            last = r;
+            if (skip > 0) {
+                --skip;
+                continue;
+            }
+            if (Selection.converged(r.get(CaptureResult.LENS_STATE), r.get(CaptureResult.CONTROL_AE_STATE), r.get(CaptureResult.CONTROL_AWB_STATE))) {
+                if (++streak >= CONVERGED_FRAMES) {
+                    converged = true;
+                    break;
+                }
+            } else {
+                streak = 0;
+            }
+        }
+        if (last == null) {
+            throw new StillException("timeout", "no frames from camera " + options.cameraId + " within " + options.convergeTimeoutMs + " ms");
+        }
+        if (!converged) {
+            Protocol.log("warn", "3A did not converge within " + options.convergeTimeoutMs + " ms (lens " + CameraProbe.lensState(
+                    last.get(CaptureResult.LENS_STATE)) + ", AE " + CameraProbe.aeState(last.get(CaptureResult.CONTROL_AE_STATE)) + ", AWB "
+                    + CameraProbe.awbState(last.get(CaptureResult.CONTROL_AWB_STATE)) + "); continuing");
+        }
+        return last;
+    }
+
+    /** Re-issue the repeating request with AE/AWB locked and wait for the HAL to report it; returns the last result. */
+    private TotalCaptureResult lock(TotalCaptureResult last) throws StillException, CameraAccessException, InterruptedException {
+        setRepeating(true);
+        long deadline = SystemClock.elapsedRealtime() + LOCK_TIMEOUT_MS;
+        int streak = 0;
+        lockConfirmed = false;
+        while (true) {
+            long remaining = deadline - SystemClock.elapsedRealtime();
+            TotalCaptureResult r = remaining > 0 ? results.poll(remaining, TimeUnit.MILLISECONDS) : null;
+            checkDevice();
+            if (r == null) {
+                break;
+            }
+            if (!TAG_LOCK.equals(r.getRequest().getTag())) {
+                continue;
+            }
+            last = r;
+            if (Selection.locked(r.get(CaptureResult.CONTROL_AE_STATE), r.get(CaptureResult.CONTROL_AWB_STATE))) {
+                if (++streak >= LOCKED_FRAMES) {
+                    lockConfirmed = true;
+                    break;
+                }
+            } else {
+                streak = 0;
+            }
+        }
+        if (!lockConfirmed) {
+            Protocol.log("warn", "AE/AWB lock requested but not reported (AE " + CameraProbe.aeState(last.get(CaptureResult.CONTROL_AE_STATE))
+                    + ", AWB " + CameraProbe.awbState(last.get(CaptureResult.CONTROL_AWB_STATE)) + ")");
+        }
+        return last;
+    }
+
+    private Image takeImage(Long timestamp, long deadline) throws StillException, InterruptedException {
+        while (true) {
+            long remaining = deadline - SystemClock.elapsedRealtime();
+            Image image = remaining > 0 ? images.poll(remaining, TimeUnit.MILLISECONDS) : null;
+            if (image == null) {
+                checkDevice();
+                throw new StillException("timeout", "no JPEG arrived within " + options.shotTimeoutMs + " ms");
+            }
+            if (timestamp == null || image.getTimestamp() == timestamp) {
+                return image;
+            }
+            image.close(); // left over from an earlier failed shot
+        }
+    }
+
+    private static int write(Image image, File file) throws IOException {
+        ByteBuffer buffer = image.getPlanes()[0].getBuffer();
+        int bytes = buffer.remaining();
+        File part = new File(file.getPath() + ".part");
+        try (FileOutputStream out = new FileOutputStream(part); FileChannel channel = out.getChannel()) {
+            while (buffer.hasRemaining()) {
+                channel.write(buffer);
+            }
+        }
+        if (!part.renameTo(file)) {
+            throw new IOException("cannot rename " + part + " to " + file.getName());
+        }
+        return bytes;
+    }
+
+    private void drainImages() {
+        Image image;
+        while ((image = images.poll()) != null) {
+            image.close();
+        }
+    }
+
+    private void checkDevice() throws StillException {
+        String lost = deviceError;
+        if (lost != null) {
+            throw new StillException("camera_disconnected", lost);
+        }
+    }
+
+    private static void putResult(JSONObject o, CaptureResult r) {
+        Protocol.put(o, "exposure_ns", r.get(CaptureResult.SENSOR_EXPOSURE_TIME));
+        Protocol.put(o, "iso", r.get(CaptureResult.SENSOR_SENSITIVITY));
+        Protocol.put(o, "frame_duration_ns", r.get(CaptureResult.SENSOR_FRAME_DURATION));
+        Protocol.put(o, "focus_distance", r.get(CaptureResult.LENS_FOCUS_DISTANCE));
+        Protocol.put(o, "lens_state", CameraProbe.lensState(r.get(CaptureResult.LENS_STATE)));
+        Protocol.put(o, "ae_state", CameraProbe.aeState(r.get(CaptureResult.CONTROL_AE_STATE)));
+        Protocol.put(o, "awb_state", CameraProbe.awbState(r.get(CaptureResult.CONTROL_AWB_STATE)));
+        RggbChannelVector gains = r.get(CaptureResult.COLOR_CORRECTION_GAINS);
+        Protocol.put(o, "awb_gains",
+                gains == null ? null : Protocol.array(gains.getRed(), gains.getGreenEven(), gains.getGreenOdd(), gains.getBlue()));
+        Protocol.put(o, "active_physical_id", r.get(CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID));
+        Protocol.put(o, "sensor_timestamp", r.get(CaptureResult.SENSOR_TIMESTAMP));
+        Protocol.put(o, "frame_number", r.getFrameNumber());
+    }
+
+    private static <T> T await(CompletableFuture<T> future, long timeoutMs, String what) throws StillException, InterruptedException {
+        try {
+            return future.get(timeoutMs, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            throw new StillException("timeout", what + " timed out after " + timeoutMs + " ms");
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof StillException) {
+                throw (StillException) cause;
+            }
+            if (cause instanceof CameraAccessException) {
+                throw new StillException(accessCode(((CameraAccessException) cause).getReason()), what + ": " + cause.getMessage(), cause);
+            }
+            throw new StillException("internal", what + ": " + cause, cause);
+        }
+    }
+
+    private static int deviceErrorReason(int error) {
+        switch (error) {
+            case CameraDevice.StateCallback.ERROR_CAMERA_IN_USE:
+                return CameraAccessException.CAMERA_IN_USE;
+            case CameraDevice.StateCallback.ERROR_MAX_CAMERAS_IN_USE:
+                return CameraAccessException.MAX_CAMERAS_IN_USE;
+            case CameraDevice.StateCallback.ERROR_CAMERA_DISABLED:
+                return CameraAccessException.CAMERA_DISABLED;
+            default:
+                return CameraAccessException.CAMERA_ERROR;
+        }
+    }
+
+    static String accessCode(int reason) {
+        switch (reason) {
+            case CameraAccessException.CAMERA_IN_USE:
+            case CameraAccessException.MAX_CAMERAS_IN_USE:
+                return "camera_in_use";
+            case CameraAccessException.CAMERA_DISCONNECTED:
+                return "camera_disconnected";
+            case CameraAccessException.CAMERA_DISABLED:
+                return "camera_disabled";
+            default:
+                return "camera_error";
+        }
+    }
+}
