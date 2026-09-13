@@ -2,6 +2,7 @@ package com.genymobile.scrcpy.still;
 
 import com.genymobile.scrcpy.AndroidVersions;
 import com.genymobile.scrcpy.util.HandlerExecutor;
+import com.genymobile.scrcpy.util.IO;
 import com.genymobile.scrcpy.wrappers.ServiceManager;
 
 import android.annotation.SuppressLint;
@@ -35,7 +36,6 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.channels.FileChannel;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -47,6 +47,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.Predicate;
 
 /**
  * One opened camera for still shots. A small YUV stream keeps 3A running with the requested focus (and, once locked, holds the AE/AWB
@@ -59,11 +60,14 @@ final class StillSession implements AutoCloseable {
 
     private static final String TAG_CONVERGE = "converge";
     private static final String TAG_LOCK = "lock";
+    private static final int OPEN_TIMEOUT_MS = 8000;
     private static final int OPEN_RETRY_MS = 300;
-    private static final int SKIP_FRAMES = 2;
+    private static final int CONVERGE_TIMEOUT_MS = 3000;
+    private static final int CONVERGE_SKIP_FRAMES = 2;
     private static final int CONVERGED_FRAMES = 3;
     private static final int LOCK_TIMEOUT_MS = 1500;
     private static final int LOCKED_FRAMES = 2;
+    private static final int SHOT_TIMEOUT_MS = 10000;
 
     static final class Options {
         String cameraId = "0";
@@ -71,12 +75,8 @@ final class StillSession implements AutoCloseable {
         boolean afOff; // autofocus off even without a distance
         boolean lock = true; // lock AE/AWB once converged
         int warmupMs;
-        int convergeTimeoutMs = 3000;
-        int openTimeoutMs = 8000;
-        int shotTimeoutMs = 10000;
         String dir = "/data/local/tmp/phonecap-stills";
-        String jpegSize = "max";
-        String fpsRange = "lowest";
+        String fpsRange = "lowest"; // "lowest" or "fixed:N" (Selection.fpsRange)
 
         static Options fromJson(JSONObject j) {
             Options o = new Options();
@@ -87,13 +87,20 @@ final class StillSession implements AutoCloseable {
             o.afOff = j.optBoolean("af_off", o.afOff);
             o.lock = j.optBoolean("lock", o.lock);
             o.warmupMs = j.optInt("warmup_ms", o.warmupMs);
-            o.convergeTimeoutMs = j.optInt("converge_timeout_ms", o.convergeTimeoutMs);
-            o.openTimeoutMs = j.optInt("open_timeout_ms", o.openTimeoutMs);
-            o.shotTimeoutMs = j.optInt("shot_timeout_ms", o.shotTimeoutMs);
             o.dir = j.optString("dir", o.dir);
-            o.jpegSize = j.optString("jpeg_size", o.jpegSize);
             o.fpsRange = j.optString("fps_range", o.fpsRange);
             return o;
+        }
+    }
+
+    /** How a settle wait ended: the last result of the awaited request (null if none came) and whether the condition held. */
+    private static final class Settled {
+        final TotalCaptureResult result;
+        final boolean reached;
+
+        Settled(TotalCaptureResult result, boolean reached) {
+            this.result = result;
+            this.reached = reached;
         }
     }
 
@@ -101,6 +108,7 @@ final class StillSession implements AutoCloseable {
     private final BlockingQueue<TotalCaptureResult> results = new ArrayBlockingQueue<>(64);
     private final BlockingQueue<Image> images = new LinkedBlockingQueue<>();
     private volatile String deviceError; // set by the device callbacks once the camera is lost
+    private volatile boolean collecting; // preview results are queued only while a settle wait reads them
 
     private HandlerThread thread;
     private Handler handler;
@@ -110,14 +118,11 @@ final class StillSession implements AutoCloseable {
     private float focusRequest = Float.NaN; // the clamped LENS_FOCUS_DISTANCE, NaN: not set
     private Range<Integer> fpsRange;
     private Size jpegSize;
-    private boolean jpegHighRes;
     private Size previewSize;
     private CameraDevice device;
     private CameraCaptureSession session;
     private ImageReader jpegReader;
     private ImageReader previewReader;
-    private boolean converged;
-    private boolean lockConfirmed;
 
     StillSession(Options options) {
         this.options = options;
@@ -126,6 +131,7 @@ final class StillSession implements AutoCloseable {
     /** Open the camera, configure it, let 3A converge and lock; returns the "ready" event (without id). Closes itself on failure. */
     JSONObject open() throws StillException {
         long start = SystemClock.elapsedRealtime();
+        boolean ok = false;
         try {
             thread = new HandlerThread("still-camera");
             thread.start();
@@ -163,10 +169,29 @@ final class StillSession implements AutoCloseable {
             long openMs = SystemClock.elapsedRealtime() - openStart;
 
             long convergeStart = SystemClock.elapsedRealtime();
-            TotalCaptureResult last = converge();
+            Settled converged = settle(TAG_CONVERGE, CONVERGE_TIMEOUT_MS, CONVERGE_SKIP_FRAMES, CONVERGED_FRAMES,
+                    r -> Selection.converged(r.get(CaptureResult.LENS_STATE), r.get(CaptureResult.CONTROL_AE_STATE),
+                            r.get(CaptureResult.CONTROL_AWB_STATE)));
             long convergeMs = SystemClock.elapsedRealtime() - convergeStart;
+            if (converged.result == null) {
+                throw new StillException("timeout", "no frames from camera " + options.cameraId + " within " + CONVERGE_TIMEOUT_MS + " ms");
+            }
+            TotalCaptureResult last = converged.result;
+            if (!converged.reached) {
+                Protocol.log("warn", "3A did not converge within " + CONVERGE_TIMEOUT_MS + " ms (" + states(last) + "); continuing");
+            }
+            boolean lockConfirmed = false;
             if (options.lock) {
-                last = lock(last);
+                setRepeating(true);
+                Settled locked = settle(TAG_LOCK, LOCK_TIMEOUT_MS, 0, LOCKED_FRAMES,
+                        r -> Selection.locked(r.get(CaptureResult.CONTROL_AE_STATE), r.get(CaptureResult.CONTROL_AWB_STATE)));
+                lockConfirmed = locked.reached;
+                if (locked.result != null) {
+                    last = locked.result;
+                }
+                if (!lockConfirmed) {
+                    Protocol.log("warn", "AE/AWB lock requested but not reported (" + states(last) + ")");
+                }
             }
 
             File dir = new File(options.dir);
@@ -178,7 +203,6 @@ final class StillSession implements AutoCloseable {
             Protocol.put(ready, "camera_id", options.cameraId);
             Protocol.put(ready, "hardware_level", CameraProbe.hardwareLevel(characteristics.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL)));
             Protocol.put(ready, "jpeg_size", CameraProbe.size(jpegSize));
-            Protocol.put(ready, "jpeg_high_res", jpegHighRes);
             Protocol.put(ready, "preview_size", CameraProbe.size(previewSize));
             Protocol.put(ready, "fps_range", fpsRange == null ? null : Protocol.array(fpsRange.getLower(), fpsRange.getUpper()));
             Protocol.put(ready, "af_off_supported", afOffSupported);
@@ -186,36 +210,28 @@ final class StillSession implements AutoCloseable {
             Protocol.put(ready, "min_focus_distance", characteristics.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE));
             Protocol.put(ready, "focus_calibration",
                     CameraProbe.focusCalibration(characteristics.get(CameraCharacteristics.LENS_INFO_FOCUS_DISTANCE_CALIBRATION)));
-            Protocol.put(ready, "converged", converged);
+            Protocol.put(ready, "converged", converged.reached);
             Protocol.put(ready, "converge_ms", convergeMs);
-            Protocol.put(ready, "locked", options.lock);
             Protocol.put(ready, "lock_confirmed", lockConfirmed);
             Protocol.put(ready, "warmup_ms", warmupMs);
             Protocol.put(ready, "open_ms", openMs);
             Protocol.put(ready, "total_ms", SystemClock.elapsedRealtime() - start);
             putResult(ready, last);
+            ok = true;
             return ready;
         } catch (StillException e) {
-            close();
             throw e;
-        } catch (CameraAccessException e) {
-            close();
-            throw new StillException(accessCode(e.getReason()), "camera " + options.cameraId + ": " + e.getMessage(), e);
-        } catch (InterruptedException e) {
-            close();
-            Thread.currentThread().interrupt();
-            throw new StillException("internal", "interrupted", e);
-        } catch (RuntimeException e) {
-            close();
-            throw new StillException("internal", String.valueOf(e), e);
+        } catch (Exception e) {
+            throw wrap(e, "camera " + options.cameraId);
+        } finally {
+            if (!ok) {
+                close();
+            }
         }
     }
 
     /** Take one still into dir/name.jpg; returns the "shot" event (without id). */
     JSONObject shoot(String name) throws StillException {
-        if (session == null) {
-            throw new StillException("bad_command", "no camera is open");
-        }
         if (!Selection.validName(name)) {
             throw new StillException("bad_command", "bad still name: " + name);
         }
@@ -248,10 +264,10 @@ final class StillSession implements AutoCloseable {
                     done.completeExceptionally(new StillException("buffer_lost", "JPEG buffer lost for frame " + frameNumber));
                 }
             }, handler);
-            TotalCaptureResult result = await(done, options.shotTimeoutMs, "still capture");
+            TotalCaptureResult result = await(done, SHOT_TIMEOUT_MS, "still capture");
             long captureMs = SystemClock.elapsedRealtime() - start;
 
-            Image image = takeImage(result.get(CaptureResult.SENSOR_TIMESTAMP), start + options.shotTimeoutMs);
+            Image image = takeImage(result.get(CaptureResult.SENSOR_TIMESTAMP), start + SHOT_TIMEOUT_MS);
             long writeStart = SystemClock.elapsedRealtime();
             File file = new File(options.dir, name + ".jpg");
             int bytes;
@@ -276,21 +292,11 @@ final class StillSession implements AutoCloseable {
             Protocol.put(shot, "latency_ms", now - start);
             putResult(shot, result);
             return shot;
-        } catch (CameraAccessException e) {
-            throw new StillException(accessCode(e.getReason()), "still capture: " + e.getMessage(), e);
-        } catch (IOException e) {
-            throw new StillException("io", "writing " + name + ".jpg: " + e.getMessage(), e);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new StillException("internal", "interrupted", e);
-        } catch (IllegalStateException e) { // session or device closed underneath
-            String lost = deviceError;
-            throw new StillException(lost != null ? "camera_disconnected" : "internal", lost != null ? lost : String.valueOf(e), e);
+        } catch (StillException e) {
+            throw e;
+        } catch (Exception e) {
+            throw wrap(e, "still " + name);
         }
-    }
-
-    boolean isOpen() {
-        return session != null;
     }
 
     @Override
@@ -323,20 +329,13 @@ final class StillSession implements AutoCloseable {
             device = null;
         }
         drainImages();
-        if (jpegReader != null) {
-            jpegReader.close();
-            jpegReader = null;
-        }
-        if (previewReader != null) {
-            previewReader.close();
-            previewReader = null;
-        }
+        closeReaders();
         results.clear();
     }
 
     @SuppressLint("MissingPermission")
     private void openDevice() throws StillException, InterruptedException {
-        long deadline = SystemClock.elapsedRealtime() + options.openTimeoutMs;
+        long deadline = SystemClock.elapsedRealtime() + OPEN_TIMEOUT_MS;
         while (true) {
             CompletableFuture<CameraDevice> future = new CompletableFuture<>();
             try {
@@ -376,7 +375,7 @@ final class StillSession implements AutoCloseable {
                 retryOrThrow((CameraAccessException) cause, deadline);
             } catch (TimeoutException e) {
                 future.thenAccept(CameraDevice::close);
-                throw new StillException("timeout", "camera " + options.cameraId + " did not open within " + options.openTimeoutMs + " ms");
+                throw new StillException("timeout", "camera " + options.cameraId + " did not open within " + OPEN_TIMEOUT_MS + " ms");
             }
         }
     }
@@ -393,8 +392,8 @@ final class StillSession implements AutoCloseable {
 
     private void configure() throws StillException, CameraAccessException, InterruptedException {
         StreamConfigurationMap map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
-        Size[] regular = CameraProbe.outputSizes(map, ImageFormat.JPEG);
-        List<Size> candidates = jpegCandidates(regular, CameraProbe.highResolutionSizes(map, ImageFormat.JPEG));
+        List<Size> candidates = jpegCandidates(CameraProbe.outputSizes(map, ImageFormat.JPEG),
+                CameraProbe.highResolutionSizes(map, ImageFormat.JPEG));
         for (int i = 0; i < candidates.size(); ++i) {
             Size size = candidates.get(i);
             Size preview = CameraProbe.previewSize(map, size);
@@ -429,32 +428,22 @@ final class StillSession implements AutoCloseable {
                 throw new StillException("config_unsupported", description + " is not a supported configuration");
             }
             device.createCaptureSession(config);
-            session = await(configured, options.openTimeoutMs, "session configuration");
+            session = await(configured, OPEN_TIMEOUT_MS, "session configuration");
             jpegSize = size;
-            jpegHighRes = !Arrays.asList(regular).contains(size);
             previewSize = preview;
             return;
         }
         throw new StillException("config_unsupported", "camera " + options.cameraId + " offers no JPEG output");
     }
 
-    private List<Size> jpegCandidates(Size[] regular, Size[] highRes) throws StillException {
+    /**
+     * The JPEG sizes to try, best first: the largest high-resolution size when it is larger than the largest regular one (it is outside
+     * the guaranteed stream combinations, so the session check decides), then the largest regular one.
+     */
+    private static List<Size> jpegCandidates(Size[] regular, Size[] highRes) {
         List<Size> candidates = new ArrayList<>();
-        if (!"max".equals(options.jpegSize)) {
-            int[] wh = Selection.parseSize(options.jpegSize);
-            if (wh == null) {
-                throw new StillException("bad_command", "jpeg_size must be \"max\" or WxH, not " + options.jpegSize);
-            }
-            Size wanted = new Size(wh[0], wh[1]);
-            if (!Arrays.asList(regular).contains(wanted) && !Arrays.asList(highRes).contains(wanted)) {
-                throw new StillException("config_unsupported", "camera " + options.cameraId + " offers no JPEG " + wanted);
-            }
-            candidates.add(wanted);
-            return candidates;
-        }
         Size largestRegular = CameraProbe.largest(regular);
         Size largestHighRes = CameraProbe.largest(highRes);
-        // high-resolution sizes are outside the guaranteed stream combinations: only tried when larger, and checked first
         if (largestHighRes != null && (largestRegular == null || area(largestHighRes) > area(largestRegular))) {
             candidates.add(largestHighRes);
         }
@@ -516,10 +505,11 @@ final class StillSession implements AutoCloseable {
         apply3A(builder, lock);
         builder.setTag(lock ? TAG_LOCK : TAG_CONVERGE);
         results.clear();
+        collecting = true;
         session.setRepeatingRequest(builder.build(), new CameraCaptureSession.CaptureCallback() {
             @Override
             public void onCaptureCompleted(CameraCaptureSession s, CaptureRequest request, TotalCaptureResult result) {
-                if (!results.offer(result)) {
+                if (collecting && !results.offer(result)) {
                     results.poll();
                     results.offer(result);
                 }
@@ -547,79 +537,45 @@ final class StillSession implements AutoCloseable {
         builder.set(CaptureRequest.CONTROL_AWB_LOCK, lock);
     }
 
-    /** Wait until lens, AE and AWB report settled on consecutive frames (or the timeout); returns the last result. */
-    private TotalCaptureResult converge() throws StillException, InterruptedException {
-        long deadline = SystemClock.elapsedRealtime() + options.convergeTimeoutMs;
-        int skip = SKIP_FRAMES;
-        int streak = 0;
+    /**
+     * Read results of the repeating request tagged `tag` until `condition` holds on `frames` consecutive ones (after skipping `skip`)
+     * or `timeoutMs` passes. Stops the result queue afterwards: nothing reads it between settle waits.
+     */
+    private Settled settle(String tag, int timeoutMs, int skip, int frames, Predicate<CaptureResult> condition)
+            throws StillException, InterruptedException {
+        long deadline = SystemClock.elapsedRealtime() + timeoutMs;
         TotalCaptureResult last = null;
-        converged = false;
-        while (true) {
-            long remaining = deadline - SystemClock.elapsedRealtime();
-            TotalCaptureResult r = remaining > 0 ? results.poll(remaining, TimeUnit.MILLISECONDS) : null;
-            checkDevice();
-            if (r == null) {
-                break;
-            }
-            if (!TAG_CONVERGE.equals(r.getRequest().getTag())) {
-                continue;
-            }
-            last = r;
-            if (skip > 0) {
-                --skip;
-                continue;
-            }
-            if (Selection.converged(r.get(CaptureResult.LENS_STATE), r.get(CaptureResult.CONTROL_AE_STATE), r.get(CaptureResult.CONTROL_AWB_STATE))) {
-                if (++streak >= CONVERGED_FRAMES) {
-                    converged = true;
-                    break;
+        int toSkip = skip;
+        int streak = 0;
+        try {
+            while (true) {
+                long remaining = deadline - SystemClock.elapsedRealtime();
+                TotalCaptureResult r = remaining > 0 ? results.poll(remaining, TimeUnit.MILLISECONDS) : null;
+                checkDevice();
+                if (r == null) {
+                    return new Settled(last, false);
                 }
-            } else {
-                streak = 0;
+                if (!tag.equals(r.getRequest().getTag())) {
+                    continue;
+                }
+                last = r;
+                if (toSkip > 0) {
+                    --toSkip;
+                } else if (!condition.test(r)) {
+                    streak = 0;
+                } else if (++streak >= frames) {
+                    return new Settled(r, true);
+                }
             }
+        } finally {
+            collecting = false;
+            results.clear();
         }
-        if (last == null) {
-            throw new StillException("timeout", "no frames from camera " + options.cameraId + " within " + options.convergeTimeoutMs + " ms");
-        }
-        if (!converged) {
-            Protocol.log("warn", "3A did not converge within " + options.convergeTimeoutMs + " ms (lens " + CameraProbe.lensState(
-                    last.get(CaptureResult.LENS_STATE)) + ", AE " + CameraProbe.aeState(last.get(CaptureResult.CONTROL_AE_STATE)) + ", AWB "
-                    + CameraProbe.awbState(last.get(CaptureResult.CONTROL_AWB_STATE)) + "); continuing");
-        }
-        return last;
     }
 
-    /** Re-issue the repeating request with AE/AWB locked and wait for the HAL to report it; returns the last result. */
-    private TotalCaptureResult lock(TotalCaptureResult last) throws StillException, CameraAccessException, InterruptedException {
-        setRepeating(true);
-        long deadline = SystemClock.elapsedRealtime() + LOCK_TIMEOUT_MS;
-        int streak = 0;
-        lockConfirmed = false;
-        while (true) {
-            long remaining = deadline - SystemClock.elapsedRealtime();
-            TotalCaptureResult r = remaining > 0 ? results.poll(remaining, TimeUnit.MILLISECONDS) : null;
-            checkDevice();
-            if (r == null) {
-                break;
-            }
-            if (!TAG_LOCK.equals(r.getRequest().getTag())) {
-                continue;
-            }
-            last = r;
-            if (Selection.locked(r.get(CaptureResult.CONTROL_AE_STATE), r.get(CaptureResult.CONTROL_AWB_STATE))) {
-                if (++streak >= LOCKED_FRAMES) {
-                    lockConfirmed = true;
-                    break;
-                }
-            } else {
-                streak = 0;
-            }
-        }
-        if (!lockConfirmed) {
-            Protocol.log("warn", "AE/AWB lock requested but not reported (AE " + CameraProbe.aeState(last.get(CaptureResult.CONTROL_AE_STATE))
-                    + ", AWB " + CameraProbe.awbState(last.get(CaptureResult.CONTROL_AWB_STATE)) + ")");
-        }
-        return last;
+    private static String states(CaptureResult r) {
+        return "lens " + CameraProbe.lensState(r.get(CaptureResult.LENS_STATE)) + ", AE " + CameraProbe.aeState(
+                r.get(CaptureResult.CONTROL_AE_STATE)) + ", AWB " + CameraProbe.awbState(r.get(CaptureResult.CONTROL_AWB_STATE));
     }
 
     private Image takeImage(Long timestamp, long deadline) throws StillException, InterruptedException {
@@ -628,7 +584,7 @@ final class StillSession implements AutoCloseable {
             Image image = remaining > 0 ? images.poll(remaining, TimeUnit.MILLISECONDS) : null;
             if (image == null) {
                 checkDevice();
-                throw new StillException("timeout", "no JPEG arrived within " + options.shotTimeoutMs + " ms");
+                throw new StillException("timeout", "no JPEG arrived within " + SHOT_TIMEOUT_MS + " ms");
             }
             if (timestamp == null || image.getTimestamp() == timestamp) {
                 return image;
@@ -641,10 +597,8 @@ final class StillSession implements AutoCloseable {
         ByteBuffer buffer = image.getPlanes()[0].getBuffer();
         int bytes = buffer.remaining();
         File part = new File(file.getPath() + ".part");
-        try (FileOutputStream out = new FileOutputStream(part); FileChannel channel = out.getChannel()) {
-            while (buffer.hasRemaining()) {
-                channel.write(buffer);
-            }
+        try (FileOutputStream out = new FileOutputStream(part)) {
+            IO.writeFully(out.getFD(), buffer);
         }
         if (!part.renameTo(file)) {
             throw new IOException("cannot rename " + part + " to " + file.getName());
@@ -682,7 +636,7 @@ final class StillSession implements AutoCloseable {
         Protocol.put(o, "frame_number", r.getFrameNumber());
     }
 
-    private static <T> T await(CompletableFuture<T> future, long timeoutMs, String what) throws StillException, InterruptedException {
+    private <T> T await(CompletableFuture<T> future, long timeoutMs, String what) throws StillException, InterruptedException {
         try {
             return future.get(timeoutMs, TimeUnit.MILLISECONDS);
         } catch (TimeoutException e) {
@@ -692,11 +646,29 @@ final class StillSession implements AutoCloseable {
             if (cause instanceof StillException) {
                 throw (StillException) cause;
             }
-            if (cause instanceof CameraAccessException) {
-                throw new StillException(accessCode(((CameraAccessException) cause).getReason()), what + ": " + cause.getMessage(), cause);
+            if (cause instanceof Exception) {
+                throw wrap((Exception) cause, what);
             }
             throw new StillException("internal", what + ": " + cause, cause);
         }
+    }
+
+    /** A failure as the error the host receives: camera errors keep their reason; anything after the camera was lost says so. */
+    private StillException wrap(Exception e, String what) {
+        if (e instanceof InterruptedException) {
+            Thread.currentThread().interrupt();
+        }
+        String code;
+        if (e instanceof CameraAccessException) {
+            code = accessCode(((CameraAccessException) e).getReason());
+        } else if (e instanceof IOException) {
+            code = "io";
+        } else if (deviceError != null) {
+            code = "camera_disconnected"; // the session or device was closed underneath
+        } else {
+            code = "internal";
+        }
+        return new StillException(code, what + ": " + (e.getMessage() != null ? e.getMessage() : e.toString()), e);
     }
 
     private static int deviceErrorReason(int error) {

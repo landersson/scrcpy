@@ -56,24 +56,6 @@ final class Selection {
         return Math.abs((long) w1 * h2 - (long) w2 * h1) <= 0.01 * w2 * h1;
     }
 
-    /** {width, height} from "WxH", or null if malformed. */
-    static int[] parseSize(String s) {
-        if (s == null) {
-            return null;
-        }
-        String[] parts = s.split("x");
-        if (parts.length != 2) {
-            return null;
-        }
-        try {
-            int w = Integer.parseInt(parts[0]);
-            int h = Integer.parseInt(parts[1]);
-            return w > 0 && h > 0 ? new int[] {w, h} : null;
-        } catch (NumberFormatException e) {
-            return null;
-        }
-    }
-
     /**
      * The LENS_FOCUS_DISTANCE to request: the requested distance clamped to [0, minFocusDistance], the same rule as scrcpy's
      * --camera-focus-distance. NaN when nothing was requested or the lens is fixed-focus (minimum focus distance 0 or unknown).

@@ -26,15 +26,6 @@ public class SelectionTest {
     }
 
     @Test
-    public void testParseSize() {
-        Assert.assertArrayEquals(new int[] {4080, 3060}, Selection.parseSize("4080x3060"));
-        Assert.assertNull(Selection.parseSize("max"));
-        Assert.assertNull(Selection.parseSize("0x10"));
-        Assert.assertNull(Selection.parseSize("10x"));
-        Assert.assertNull(Selection.parseSize(null));
-    }
-
-    @Test
     public void testClampFocus() {
         Assert.assertTrue(Float.isNaN(Selection.clampFocus(Float.NaN, 10f)));
         Assert.assertTrue(Float.isNaN(Selection.clampFocus(1.5f, null)));

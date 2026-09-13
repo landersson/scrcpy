@@ -25,7 +25,7 @@ import java.nio.charset.StandardCharsets;
  * Native Camera2 stills for phonecap, run as the shell user like the scrcpy server itself:
  * <pre>
  * CLASSPATH=/data/local/tmp/phonecap-still-server.jar app_process / com.genymobile.scrcpy.still.StillServer probe [cameraId]
- * CLASSPATH=/data/local/tmp/phonecap-still-server.jar app_process / com.genymobile.scrcpy.still.StillServer serve [--idle-timeout-s N]
+ * CLASSPATH=/data/local/tmp/phonecap-still-server.jar app_process / com.genymobile.scrcpy.still.StillServer serve
  * </pre>
  * "probe" prints one {"event":"camera"} line per camera and exits; it opens no camera. "serve" prints {"event":"hello"}, then reads one
  * JSON command per line on stdin (open, shoot, ping, close) and answers each with one JSON line on stdout (ready, shot, pong, closed or
@@ -34,7 +34,7 @@ import java.nio.charset.StandardCharsets;
 public final class StillServer {
 
     static final int PROTOCOL = 1;
-    private static final int DEFAULT_IDLE_TIMEOUT_S = 300;
+    private static final int IDLE_TIMEOUT_S = 300;
     private static final int EXIT_USAGE = 2;
     private static final int EXIT_IDLE = 3;
 
@@ -74,9 +74,9 @@ public final class StillServer {
             case "probe":
                 return probe(args.length > 1 ? args[1] : null);
             case "serve":
-                return serve(idleTimeoutS(args));
+                return serve();
             default:
-                Protocol.error(null, "bad_command", "usage: StillServer probe [cameraId] | serve [--idle-timeout-s N]", true);
+                Protocol.error(null, "bad_command", "usage: StillServer probe [cameraId] | serve", true);
                 return EXIT_USAGE;
         }
     }
@@ -105,7 +105,7 @@ public final class StillServer {
         return t + (trace.length > 0 ? " at " + trace[0] : "");
     }
 
-    private static int serve(int idleTimeoutS) throws IOException {
+    private static int serve() throws IOException {
         JSONObject hello = Protocol.event("hello", null);
         Protocol.put(hello, "protocol", PROTOCOL);
         Protocol.put(hello, "sdk", Build.VERSION.SDK_INT);
@@ -116,9 +116,7 @@ public final class StillServer {
         Protocol.send(hello);
 
         lastActivity = SystemClock.elapsedRealtime();
-        if (idleTimeoutS > 0) {
-            startIdleWatchdog(idleTimeoutS);
-        }
+        startIdleWatchdog();
 
         BufferedReader in = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
         StillSession session = null;
@@ -199,31 +197,18 @@ public final class StillServer {
         }
     }
 
-    private static void startIdleWatchdog(int idleTimeoutS) {
+    private static void startIdleWatchdog() {
         Thread watchdog = new Thread(() -> {
             while (true) {
                 SystemClock.sleep(1000);
-                if (!busy && SystemClock.elapsedRealtime() - lastActivity > idleTimeoutS * 1000L) {
-                    Protocol.log("warn", "no command for " + idleTimeoutS + " s; exiting");
+                if (!busy && SystemClock.elapsedRealtime() - lastActivity > IDLE_TIMEOUT_S * 1000L) {
+                    Protocol.log("warn", "no command for " + IDLE_TIMEOUT_S + " s; exiting");
                     System.exit(EXIT_IDLE); // the camera service releases the camera when the process dies
                 }
             }
         }, "still-idle");
         watchdog.setDaemon(true);
         watchdog.start();
-    }
-
-    private static int idleTimeoutS(String... args) {
-        for (int i = 1; i < args.length - 1; ++i) {
-            if ("--idle-timeout-s".equals(args[i])) {
-                try {
-                    return Integer.parseInt(args[i + 1]);
-                } catch (NumberFormatException e) {
-                    break;
-                }
-            }
-        }
-        return DEFAULT_IDLE_TIMEOUT_S;
     }
 
     private static void prepareMainLooper() {
