@@ -743,6 +743,8 @@ final class StillSession implements AutoCloseable {
         RggbChannelVector gains = r.get(CaptureResult.COLOR_CORRECTION_GAINS);
         Protocol.put(o, "awb_gains",
                 gains == null ? null : Protocol.array(gains.getRed(), gains.getGreenEven(), gains.getGreenOdd(), gains.getBlue()));
+        // digital gain after the sensor, part of AE on some HALs (the Pixel): not in exposure x ISO
+        Protocol.put(o, "post_raw_boost", r.get(CaptureResult.CONTROL_POST_RAW_SENSITIVITY_BOOST));
         Protocol.put(o, "noise_reduction_mode", CameraProbe.name(r.get(CaptureResult.NOISE_REDUCTION_MODE), Selection.NOISE_REDUCTION_MODES));
         Protocol.put(o, "edge_mode", CameraProbe.name(r.get(CaptureResult.EDGE_MODE), Selection.EDGE_MODES));
         Protocol.put(o, "active_physical_id", r.get(CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID));
