@@ -168,7 +168,7 @@ public final class StillServer {
                     if (session == null) {
                         throw new StillException("bad_command", "no camera is open (send open first)");
                     }
-                    JSONObject shot = session.shoot(command.getString("name"));
+                    JSONObject shot = session.shoot(command.getString("name"), StillSession.ShotOptions.fromJson(command));
                     Protocol.put(shot, "id", id);
                     Protocol.send(shot);
                     return session;

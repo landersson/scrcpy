@@ -73,6 +73,18 @@ public class SelectionTest {
     }
 
     @Test
+    public void testMode() {
+        Assert.assertEquals(-1, Selection.mode(null, Selection.EDGE_MODES));
+        Assert.assertEquals(-1, Selection.mode("default", Selection.EDGE_MODES));
+        Assert.assertEquals(CameraMetadata.NOISE_REDUCTION_MODE_OFF, Selection.mode("off", Selection.NOISE_REDUCTION_MODES));
+        Assert.assertEquals(CameraMetadata.NOISE_REDUCTION_MODE_HIGH_QUALITY, Selection.mode("hq", Selection.NOISE_REDUCTION_MODES));
+        Assert.assertEquals(CameraMetadata.NOISE_REDUCTION_MODE_MINIMAL, Selection.mode("minimal", Selection.NOISE_REDUCTION_MODES));
+        Assert.assertEquals(CameraMetadata.EDGE_MODE_FAST, Selection.mode("fast", Selection.EDGE_MODES));
+        Assert.assertEquals(CameraMetadata.EDGE_MODE_ZERO_SHUTTER_LAG, Selection.mode("zsl", Selection.EDGE_MODES));
+        Assert.assertEquals(-2, Selection.mode("minimal", Selection.EDGE_MODES));
+    }
+
+    @Test
     public void testValidName() {
         Assert.assertTrue(Selection.validName("RFGL74G6ESH-s01-a045"));
         Assert.assertFalse(Selection.validName(""));

@@ -17,6 +17,7 @@ import android.hardware.camera2.CameraMetadata;
 import android.hardware.camera2.CaptureFailure;
 import android.hardware.camera2.CaptureRequest;
 import android.hardware.camera2.CaptureResult;
+import android.hardware.camera2.DngCreator;
 import android.hardware.camera2.TotalCaptureResult;
 import android.hardware.camera2.params.OutputConfiguration;
 import android.hardware.camera2.params.RggbChannelVector;
@@ -32,8 +33,10 @@ import android.util.Size;
 import android.view.Surface;
 import org.json.JSONObject;
 
+import java.io.BufferedOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.OutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -68,6 +71,7 @@ final class StillSession implements AutoCloseable {
     private static final int LOCK_TIMEOUT_MS = 1500;
     private static final int LOCKED_FRAMES = 2;
     private static final int SHOT_TIMEOUT_MS = 10000;
+    private static final long MANUAL_FRAME_DURATION_NS = 33_333_333L; // at least; longer for a longer manual exposure
 
     static final class Options {
         String cameraId = "0";
@@ -77,6 +81,7 @@ final class StillSession implements AutoCloseable {
         int warmupMs;
         String dir = "/data/local/tmp/phonecap-stills";
         String fpsRange = "lowest"; // "lowest" or "fixed:N" (Selection.fpsRange)
+        boolean raw; // also configure a RAW_SENSOR stream (shots may then ask for a DNG)
 
         static Options fromJson(JSONObject j) {
             Options o = new Options();
@@ -89,6 +94,26 @@ final class StillSession implements AutoCloseable {
             o.warmupMs = j.optInt("warmup_ms", o.warmupMs);
             o.dir = j.optString("dir", o.dir);
             o.fpsRange = j.optString("fps_range", o.fpsRange);
+            o.raw = j.optBoolean("raw", o.raw);
+            return o;
+        }
+    }
+
+    /** How one shot is processed: noise reduction and edge (sharpening) modes, a manual exposure, a RAW DNG next to the JPEG. */
+    static final class ShotOptions {
+        String noiseReduction = "default"; // a Selection.NOISE_REDUCTION_MODES name, or "default": the still template's
+        String edge = "default"; // a Selection.EDGE_MODES name, or "default"
+        long exposureNs; // with iso: AE off, this exposure; 0: the (locked) AE exposure
+        int iso;
+        boolean raw; // also write name.dng (the session must be opened with raw)
+
+        static ShotOptions fromJson(JSONObject j) {
+            ShotOptions o = new ShotOptions();
+            o.noiseReduction = j.optString("noise_reduction", o.noiseReduction);
+            o.edge = j.optString("edge", o.edge);
+            o.exposureNs = j.optLong("exposure_ns", o.exposureNs);
+            o.iso = j.optInt("iso", o.iso);
+            o.raw = j.optBoolean("raw", o.raw);
             return o;
         }
     }
@@ -107,6 +132,7 @@ final class StillSession implements AutoCloseable {
     private final Options options;
     private final BlockingQueue<TotalCaptureResult> results = new ArrayBlockingQueue<>(64);
     private final BlockingQueue<Image> images = new LinkedBlockingQueue<>();
+    private final BlockingQueue<Image> rawImages = new LinkedBlockingQueue<>();
     private volatile String deviceError; // set by the device callbacks once the camera is lost
     private volatile boolean collecting; // preview results are queued only while a settle wait reads them
 
@@ -119,10 +145,12 @@ final class StillSession implements AutoCloseable {
     private Range<Integer> fpsRange;
     private Size jpegSize;
     private Size previewSize;
+    private Size rawSize;
     private CameraDevice device;
     private CameraCaptureSession session;
     private ImageReader jpegReader;
     private ImageReader previewReader;
+    private ImageReader rawReader;
 
     StillSession(Options options) {
         this.options = options;
@@ -204,6 +232,7 @@ final class StillSession implements AutoCloseable {
             Protocol.put(ready, "hardware_level", CameraProbe.hardwareLevel(characteristics.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL)));
             Protocol.put(ready, "jpeg_size", CameraProbe.size(jpegSize));
             Protocol.put(ready, "preview_size", CameraProbe.size(previewSize));
+            Protocol.put(ready, "raw_size", rawSize == null ? null : CameraProbe.size(rawSize));
             Protocol.put(ready, "fps_range", fpsRange == null ? null : Protocol.array(fpsRange.getLower(), fpsRange.getUpper()));
             Protocol.put(ready, "af_off_supported", afOffSupported);
             Protocol.put(ready, "focus_distance_requested", options.focusDistance);
@@ -230,17 +259,27 @@ final class StillSession implements AutoCloseable {
         }
     }
 
-    /** Take one still into dir/name.jpg; returns the "shot" event (without id). */
-    JSONObject shoot(String name) throws StillException {
+    /** Take one still into dir/name.jpg (and dir/name.dng when asked); returns the "shot" event (without id). */
+    JSONObject shoot(String name, ShotOptions shotOptions) throws StillException {
         if (!Selection.validName(name)) {
             throw new StillException("bad_command", "bad still name: " + name);
+        }
+        if (shotOptions.raw && rawReader == null) {
+            throw new StillException("bad_command", "a RAW still needs a session opened with raw");
+        }
+        if ((shotOptions.exposureNs > 0) != (shotOptions.iso > 0)) {
+            throw new StillException("bad_command", "a manual exposure needs both exposure_ns and iso");
         }
         try {
             checkDevice();
             drainImages();
             CaptureRequest.Builder builder = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
             builder.addTarget(jpegReader.getSurface());
+            if (shotOptions.raw) {
+                builder.addTarget(rawReader.getSurface());
+            }
             apply3A(builder, options.lock);
+            applyProcessing(builder, shotOptions);
             builder.set(CaptureRequest.JPEG_QUALITY, (byte) 100);
             builder.set(CaptureRequest.JPEG_ORIENTATION, 0);
             builder.set(CaptureRequest.JPEG_THUMBNAIL_SIZE, new Size(0, 0));
@@ -267,7 +306,8 @@ final class StillSession implements AutoCloseable {
             TotalCaptureResult result = await(done, SHOT_TIMEOUT_MS, "still capture");
             long captureMs = SystemClock.elapsedRealtime() - start;
 
-            Image image = takeImage(result.get(CaptureResult.SENSOR_TIMESTAMP), start + SHOT_TIMEOUT_MS);
+            Long timestamp = result.get(CaptureResult.SENSOR_TIMESTAMP);
+            Image image = takeImage(images, timestamp, start + SHOT_TIMEOUT_MS, "JPEG");
             long writeStart = SystemClock.elapsedRealtime();
             File file = new File(options.dir, name + ".jpg");
             int bytes;
@@ -280,6 +320,17 @@ final class StillSession implements AutoCloseable {
             } finally {
                 image.close();
             }
+            File rawFile = null;
+            long rawBytes = 0;
+            if (shotOptions.raw) {
+                Image raw = takeImage(rawImages, timestamp, start + SHOT_TIMEOUT_MS, "RAW");
+                rawFile = new File(options.dir, name + ".dng");
+                try {
+                    rawBytes = writeDng(raw, result, rawFile);
+                } finally {
+                    raw.close();
+                }
+            }
             long now = SystemClock.elapsedRealtime();
 
             JSONObject shot = Protocol.event("shot", null);
@@ -287,6 +338,8 @@ final class StillSession implements AutoCloseable {
             Protocol.put(shot, "width", width);
             Protocol.put(shot, "height", height);
             Protocol.put(shot, "bytes", bytes);
+            Protocol.put(shot, "raw_file", rawFile == null ? null : rawFile.getPath());
+            Protocol.put(shot, "raw_bytes", rawFile == null ? null : rawBytes);
             Protocol.put(shot, "capture_ms", captureMs);
             Protocol.put(shot, "write_ms", now - writeStart);
             Protocol.put(shot, "latency_ms", now - start);
@@ -402,9 +455,20 @@ final class StillSession implements AutoCloseable {
             }
             createReaders(size, preview);
             CompletableFuture<CameraCaptureSession> configured = new CompletableFuture<>();
-            List<OutputConfiguration> outputs = Arrays.asList(new OutputConfiguration(previewReader.getSurface()),
-                    new OutputConfiguration(jpegReader.getSurface()));
-            String description = "JPEG " + size + " + YUV " + preview;
+            List<OutputConfiguration> outputs = new ArrayList<>(Arrays.asList(new OutputConfiguration(previewReader.getSurface()),
+                    new OutputConfiguration(jpegReader.getSurface())));
+            Size raw = null;
+            if (options.raw) {
+                raw = CameraProbe.largest(CameraProbe.outputSizes(map, ImageFormat.RAW_SENSOR));
+                if (raw == null) {
+                    closeReaders();
+                    throw new StillException("config_unsupported", "camera " + options.cameraId + " offers no RAW_SENSOR output");
+                }
+                rawReader = ImageReader.newInstance(raw.getWidth(), raw.getHeight(), ImageFormat.RAW_SENSOR, 2);
+                rawReader.setOnImageAvailableListener(reader -> queue(reader, rawImages, "RAW"), handler);
+                outputs.add(new OutputConfiguration(rawReader.getSurface()));
+            }
+            String description = "JPEG " + size + " + YUV " + preview + (raw == null ? "" : " + RAW " + raw);
             SessionConfiguration config = new SessionConfiguration(SessionConfiguration.SESSION_REGULAR, outputs, executor,
                     new CameraCaptureSession.StateCallback() {
                         @Override
@@ -431,6 +495,7 @@ final class StillSession implements AutoCloseable {
             session = await(configured, OPEN_TIMEOUT_MS, "session configuration");
             jpegSize = size;
             previewSize = preview;
+            rawSize = raw;
             return;
         }
         throw new StillException("config_unsupported", "camera " + options.cameraId + " offers no JPEG output");
@@ -469,16 +534,7 @@ final class StillSession implements AutoCloseable {
 
     private void createReaders(Size jpeg, Size preview) {
         jpegReader = ImageReader.newInstance(jpeg.getWidth(), jpeg.getHeight(), ImageFormat.JPEG, 2);
-        jpegReader.setOnImageAvailableListener(reader -> {
-            try {
-                Image image = reader.acquireNextImage();
-                if (image != null) {
-                    images.add(image);
-                }
-            } catch (IllegalStateException e) {
-                Protocol.log("warn", "JPEG image dropped: " + e.getMessage());
-            }
-        }, handler);
+        jpegReader.setOnImageAvailableListener(reader -> queue(reader, images, "JPEG"), handler);
         previewReader = ImageReader.newInstance(preview.getWidth(), preview.getHeight(), ImageFormat.YUV_420_888, 2);
         previewReader.setOnImageAvailableListener(reader -> {
             Image image = reader.acquireLatestImage();
@@ -488,10 +544,25 @@ final class StillSession implements AutoCloseable {
         }, handler);
     }
 
+    private static void queue(ImageReader reader, BlockingQueue<Image> queue, String what) {
+        try {
+            Image image = reader.acquireNextImage();
+            if (image != null) {
+                queue.add(image);
+            }
+        } catch (IllegalStateException e) {
+            Protocol.log("warn", what + " image dropped: " + e.getMessage());
+        }
+    }
+
     private void closeReaders() {
         if (jpegReader != null) {
             jpegReader.close();
             jpegReader = null;
+        }
+        if (rawReader != null) {
+            rawReader.close();
+            rawReader = null;
         }
         if (previewReader != null) {
             previewReader.close();
@@ -537,6 +608,33 @@ final class StillSession implements AutoCloseable {
         builder.set(CaptureRequest.CONTROL_AWB_LOCK, lock);
     }
 
+    /** A shot's noise reduction and edge modes (checked against what the camera offers) and manual exposure. */
+    private void applyProcessing(CaptureRequest.Builder builder, ShotOptions o) throws StillException {
+        int noiseReduction = Selection.mode(o.noiseReduction, Selection.NOISE_REDUCTION_MODES);
+        if (noiseReduction != -1) {
+            requireMode(noiseReduction, o.noiseReduction, CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES, "noise reduction");
+            builder.set(CaptureRequest.NOISE_REDUCTION_MODE, noiseReduction);
+        }
+        int edge = Selection.mode(o.edge, Selection.EDGE_MODES);
+        if (edge != -1) {
+            requireMode(edge, o.edge, CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES, "edge");
+            builder.set(CaptureRequest.EDGE_MODE, edge);
+        }
+        if (o.exposureNs > 0) {
+            builder.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF);
+            builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, o.exposureNs);
+            builder.set(CaptureRequest.SENSOR_SENSITIVITY, o.iso);
+            builder.set(CaptureRequest.SENSOR_FRAME_DURATION, Math.max(o.exposureNs, MANUAL_FRAME_DURATION_NS));
+        }
+    }
+
+    private void requireMode(int mode, String name, CameraCharacteristics.Key<int[]> key, String what) throws StillException {
+        int[] available = characteristics.get(key);
+        if (mode < 0 || available == null || Arrays.stream(available).noneMatch(m -> m == mode)) {
+            throw new StillException("config_unsupported", what + " mode '" + name + "' is not offered (" + Arrays.toString(available) + ")");
+        }
+    }
+
     /**
      * Read results of the repeating request tagged `tag` until `condition` holds on `frames` consecutive ones (after skipping `skip`)
      * or `timeoutMs` passes. Stops the result queue afterwards: nothing reads it between settle waits.
@@ -578,13 +676,13 @@ final class StillSession implements AutoCloseable {
                 r.get(CaptureResult.CONTROL_AE_STATE)) + ", AWB " + CameraProbe.awbState(r.get(CaptureResult.CONTROL_AWB_STATE));
     }
 
-    private Image takeImage(Long timestamp, long deadline) throws StillException, InterruptedException {
+    private Image takeImage(BlockingQueue<Image> queue, Long timestamp, long deadline, String what) throws StillException, InterruptedException {
         while (true) {
             long remaining = deadline - SystemClock.elapsedRealtime();
-            Image image = remaining > 0 ? images.poll(remaining, TimeUnit.MILLISECONDS) : null;
+            Image image = remaining > 0 ? queue.poll(remaining, TimeUnit.MILLISECONDS) : null;
             if (image == null) {
                 checkDevice();
-                throw new StillException("timeout", "no JPEG arrived within " + SHOT_TIMEOUT_MS + " ms");
+                throw new StillException("timeout", "no " + what + " image arrived within " + SHOT_TIMEOUT_MS + " ms");
             }
             if (timestamp == null || image.getTimestamp() == timestamp) {
                 return image;
@@ -606,10 +704,24 @@ final class StillSession implements AutoCloseable {
         return bytes;
     }
 
+    private long writeDng(Image image, CaptureResult result, File file) throws IOException {
+        File part = new File(file.getPath() + ".part");
+        try (DngCreator dng = new DngCreator(characteristics, result);
+                OutputStream out = new BufferedOutputStream(new FileOutputStream(part), 1 << 20)) {
+            dng.writeImage(out, image);
+        }
+        if (!part.renameTo(file)) {
+            throw new IOException("cannot rename " + part + " to " + file.getName());
+        }
+        return file.length();
+    }
+
     private void drainImages() {
-        Image image;
-        while ((image = images.poll()) != null) {
-            image.close();
+        for (BlockingQueue<Image> queue : Arrays.asList(images, rawImages)) {
+            Image image;
+            while ((image = queue.poll()) != null) {
+                image.close();
+            }
         }
     }
 
@@ -631,6 +743,8 @@ final class StillSession implements AutoCloseable {
         RggbChannelVector gains = r.get(CaptureResult.COLOR_CORRECTION_GAINS);
         Protocol.put(o, "awb_gains",
                 gains == null ? null : Protocol.array(gains.getRed(), gains.getGreenEven(), gains.getGreenOdd(), gains.getBlue()));
+        Protocol.put(o, "noise_reduction_mode", CameraProbe.name(r.get(CaptureResult.NOISE_REDUCTION_MODE), Selection.NOISE_REDUCTION_MODES));
+        Protocol.put(o, "edge_mode", CameraProbe.name(r.get(CaptureResult.EDGE_MODE), Selection.EDGE_MODES));
         Protocol.put(o, "active_physical_id", r.get(CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID));
         Protocol.put(o, "sensor_timestamp", r.get(CaptureResult.SENSOR_TIMESTAMP));
         Protocol.put(o, "frame_number", r.getFrameNumber());

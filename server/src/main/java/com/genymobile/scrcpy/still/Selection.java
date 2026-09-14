@@ -7,8 +7,26 @@ import android.hardware.camera2.CameraMetadata;
  */
 final class Selection {
 
+    /** NOISE_REDUCTION_MODE names; the index is the camera2 constant. */
+    static final String[] NOISE_REDUCTION_MODES = {"off", "fast", "hq", "minimal", "zsl"};
+    /** EDGE_MODE names; the index is the camera2 constant. */
+    static final String[] EDGE_MODES = {"off", "fast", "hq", "zsl"};
+
     private Selection() {
         // not instantiable
+    }
+
+    /** The camera2 constant for a mode name in `names`: -1 for "default" or null (the template's), -2 for an unknown name. */
+    static int mode(String name, String[] names) {
+        if (name == null || "default".equals(name)) {
+            return -1;
+        }
+        for (int i = 0; i < names.length; ++i) {
+            if (names[i].equals(name)) {
+                return i;
+            }
+        }
+        return -2;
     }
 
     /** Index of the largest {width, height} pair (by area, then width), or -1 if there is none. */
