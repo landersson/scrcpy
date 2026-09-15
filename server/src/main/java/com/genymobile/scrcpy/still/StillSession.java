@@ -8,6 +8,7 @@ import com.genymobile.scrcpy.wrappers.ServiceManager;
 import android.annotation.SuppressLint;
 import android.annotation.TargetApi;
 import android.graphics.ImageFormat;
+import android.graphics.Rect;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraCaptureSession;
 import android.hardware.camera2.CameraCharacteristics;
@@ -31,6 +32,7 @@ import android.os.SystemClock;
 import android.util.Range;
 import android.util.Size;
 import android.view.Surface;
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedOutputStream;
@@ -774,9 +776,26 @@ final class StillSession implements AutoCloseable {
         Protocol.put(o, "edge_mode", CameraProbe.name(r.get(CaptureResult.EDGE_MODE), Selection.EDGE_MODES));
         Integer ois = r.get(CaptureResult.LENS_OPTICAL_STABILIZATION_MODE);
         Protocol.put(o, "ois_mode", ois == null ? null : ois == CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON ? "on" : "off");
+        // where the HAL puts the lens for this frame: optical centre (fx, fy, cx, cy, skew), pose, crop
+        Protocol.put(o, "lens_intrinsics", floats(r.get(CaptureResult.LENS_INTRINSIC_CALIBRATION)));
+        Protocol.put(o, "lens_pose_translation", floats(r.get(CaptureResult.LENS_POSE_TRANSLATION)));
+        Protocol.put(o, "lens_pose_rotation", floats(r.get(CaptureResult.LENS_POSE_ROTATION)));
+        Rect crop = r.get(CaptureResult.SCALER_CROP_REGION);
+        Protocol.put(o, "crop_region", crop == null ? null : Protocol.array(crop.left, crop.top, crop.width(), crop.height()));
         Protocol.put(o, "active_physical_id", r.get(CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID));
         Protocol.put(o, "sensor_timestamp", r.get(CaptureResult.SENSOR_TIMESTAMP));
         Protocol.put(o, "frame_number", r.getFrameNumber());
+    }
+
+    private static JSONArray floats(float[] values) {
+        if (values == null) {
+            return null;
+        }
+        Object[] boxed = new Object[values.length];
+        for (int i = 0; i < values.length; i++) {
+            boxed[i] = values[i];
+        }
+        return Protocol.array(boxed);
     }
 
     private <T> T await(CompletableFuture<T> future, long timeoutMs, String what) throws StillException, InterruptedException {
