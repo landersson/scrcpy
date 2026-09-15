@@ -33,7 +33,7 @@ import java.nio.charset.StandardCharsets;
  */
 public final class StillServer {
 
-    static final int PROTOCOL = 2; // 2: shoot takes noise_reduction, edge, exposure_ns + iso and raw
+    static final int PROTOCOL = 3; // 2: shoot takes noise_reduction, edge, exposure_ns + iso and raw; 3: open takes ois
     private static final int IDLE_TIMEOUT_S = 300;
     private static final int EXIT_USAGE = 2;
     private static final int EXIT_IDLE = 3;

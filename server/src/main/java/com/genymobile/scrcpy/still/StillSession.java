@@ -82,6 +82,7 @@ final class StillSession implements AutoCloseable {
         String dir = "/data/local/tmp/phonecap-stills";
         String fpsRange = "lowest"; // "lowest" or "fixed:N" (Selection.fpsRange)
         boolean raw; // also configure a RAW_SENSOR stream (shots may then ask for a DNG)
+        String ois = "default"; // optical stabilisation: "on", "off", or "default": the templates'
 
         static Options fromJson(JSONObject j) {
             Options o = new Options();
@@ -95,6 +96,7 @@ final class StillSession implements AutoCloseable {
             o.dir = j.optString("dir", o.dir);
             o.fpsRange = j.optString("fps_range", o.fpsRange);
             o.raw = j.optBoolean("raw", o.raw);
+            o.ois = j.optString("ois", o.ois);
             return o;
         }
     }
@@ -143,6 +145,7 @@ final class StillSession implements AutoCloseable {
     private boolean afOffSupported;
     private float focusRequest = Float.NaN; // the clamped LENS_FOCUS_DISTANCE, NaN: not set
     private Range<Integer> fpsRange;
+    private int oisMode = -1; // LENS_OPTICAL_STABILIZATION_MODE set on every request; -1: the templates'
     private Size jpegSize;
     private Size previewSize;
     private Size rawSize;
@@ -178,6 +181,7 @@ final class StillSession implements AutoCloseable {
             if (fpsRange == null) {
                 Protocol.log("warn", "no AE fps range matches '" + options.fpsRange + "'; using the template's");
             }
+            oisMode = opticalStabilization(options.ois);
             if (!Float.isNaN(options.focusDistance) && !afOffSupported) {
                 Protocol.log("warn", "camera " + options.cameraId + " cannot disable autofocus; focus_distance ignored");
             }
@@ -236,6 +240,7 @@ final class StillSession implements AutoCloseable {
             Protocol.put(ready, "fps_range", fpsRange == null ? null : Protocol.array(fpsRange.getLower(), fpsRange.getUpper()));
             Protocol.put(ready, "af_off_supported", afOffSupported);
             Protocol.put(ready, "focus_distance_requested", options.focusDistance);
+            Protocol.put(ready, "ois_requested", options.ois);
             Protocol.put(ready, "min_focus_distance", characteristics.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE));
             Protocol.put(ready, "focus_calibration",
                     CameraProbe.focusCalibration(characteristics.get(CameraCharacteristics.LENS_INFO_FOCUS_DISTANCE_CALIBRATION)));
@@ -606,6 +611,26 @@ final class StillSession implements AutoCloseable {
         }
         builder.set(CaptureRequest.CONTROL_AE_LOCK, lock);
         builder.set(CaptureRequest.CONTROL_AWB_LOCK, lock);
+        if (oisMode != -1) {
+            builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, oisMode);
+        }
+    }
+
+    /** LENS_OPTICAL_STABILIZATION_MODE for "on" or "off" (checked against what the lens offers); -1 for "default". */
+    private int opticalStabilization(String name) throws StillException {
+        if ("default".equals(name)) {
+            return -1;
+        }
+        int mode;
+        if ("off".equals(name)) {
+            mode = CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_OFF;
+        } else if ("on".equals(name)) {
+            mode = CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON;
+        } else {
+            throw new StillException("bad_command", "ois must be on, off or default: " + name);
+        }
+        requireMode(mode, name, CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION, "optical stabilisation");
+        return mode;
     }
 
     /** A shot's noise reduction and edge modes (checked against what the camera offers) and manual exposure. */
@@ -747,6 +772,8 @@ final class StillSession implements AutoCloseable {
         Protocol.put(o, "post_raw_boost", r.get(CaptureResult.CONTROL_POST_RAW_SENSITIVITY_BOOST));
         Protocol.put(o, "noise_reduction_mode", CameraProbe.name(r.get(CaptureResult.NOISE_REDUCTION_MODE), Selection.NOISE_REDUCTION_MODES));
         Protocol.put(o, "edge_mode", CameraProbe.name(r.get(CaptureResult.EDGE_MODE), Selection.EDGE_MODES));
+        Integer ois = r.get(CaptureResult.LENS_OPTICAL_STABILIZATION_MODE);
+        Protocol.put(o, "ois_mode", ois == null ? null : ois == CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON ? "on" : "off");
         Protocol.put(o, "active_physical_id", r.get(CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID));
         Protocol.put(o, "sensor_timestamp", r.get(CaptureResult.SENSOR_TIMESTAMP));
         Protocol.put(o, "frame_number", r.getFrameNumber());
