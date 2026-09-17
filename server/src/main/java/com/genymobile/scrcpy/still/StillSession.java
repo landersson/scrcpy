@@ -8,7 +8,6 @@ import com.genymobile.scrcpy.wrappers.ServiceManager;
 import android.annotation.SuppressLint;
 import android.annotation.TargetApi;
 import android.graphics.ImageFormat;
-import android.graphics.Rect;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraCaptureSession;
 import android.hardware.camera2.CameraCharacteristics;
@@ -21,7 +20,6 @@ import android.hardware.camera2.CaptureResult;
 import android.hardware.camera2.DngCreator;
 import android.hardware.camera2.TotalCaptureResult;
 import android.hardware.camera2.params.OutputConfiguration;
-import android.hardware.camera2.params.RggbChannelVector;
 import android.hardware.camera2.params.SessionConfiguration;
 import android.hardware.camera2.params.StreamConfigurationMap;
 import android.media.Image;
@@ -75,6 +73,9 @@ final class StillSession implements AutoCloseable {
     private static final int LOCKED_FRAMES = 2;
     private static final int SHOT_TIMEOUT_MS = 10000;
     private static final long MANUAL_FRAME_DURATION_NS = 33_333_333L; // at least; longer for a longer manual exposure
+
+    static final String[] RAW_FORMATS = {"sensor", "raw10", "raw12"}; // wire names; "sensor" is written as a DNG, the others packed
+    private static final int[] RAW_IMAGE_FORMATS = {ImageFormat.RAW_SENSOR, ImageFormat.RAW10, ImageFormat.RAW12};
 
     static final class Options {
         String cameraId = "0";
@@ -160,73 +161,64 @@ final class StillSession implements AutoCloseable {
         }
 
         void set(CaptureRequest.Builder builder) throws StillException {
-            Object v = value;
-            boolean array = v instanceof JSONArray;
-            int n = array ? ((JSONArray) v).length() : 1;
+            boolean array = value instanceof JSONArray;
+            int n = array ? ((JSONArray) value).length() : 1;
+            Number[] nums = new Number[n];
+            for (int i = 0; i < n; ++i) {
+                nums[i] = number(array ? ((JSONArray) value).opt(i) : value);
+            }
+            Object typed;
             switch (type) {
                 case "byte": {
-                    byte[] bytes = new byte[n];
+                    byte[] a = new byte[n];
                     for (int i = 0; i < n; ++i) {
-                        bytes[i] = (byte) number(array ? ((JSONArray) v).opt(i) : v).intValue();
+                        a[i] = (byte) nums[i].intValue();
                     }
-                    if (array) {
-                        builder.set(new CaptureRequest.Key<>(name, byte[].class), bytes);
-                    } else {
-                        builder.set(new CaptureRequest.Key<>(name, Byte.class), bytes[0]);
-                    }
-                    return;
+                    typed = array ? a : (Object) a[0];
+                    break;
                 }
                 case "int": {
-                    int[] ints = new int[n];
+                    int[] a = new int[n];
                     for (int i = 0; i < n; ++i) {
-                        ints[i] = number(array ? ((JSONArray) v).opt(i) : v).intValue();
+                        a[i] = nums[i].intValue();
                     }
-                    if (array) {
-                        builder.set(new CaptureRequest.Key<>(name, int[].class), ints);
-                    } else {
-                        builder.set(new CaptureRequest.Key<>(name, Integer.class), ints[0]);
-                    }
-                    return;
+                    typed = array ? a : (Object) a[0];
+                    break;
                 }
                 case "long": {
-                    long[] longs = new long[n];
+                    long[] a = new long[n];
                     for (int i = 0; i < n; ++i) {
-                        longs[i] = number(array ? ((JSONArray) v).opt(i) : v).longValue();
+                        a[i] = nums[i].longValue();
                     }
-                    if (array) {
-                        builder.set(new CaptureRequest.Key<>(name, long[].class), longs);
-                    } else {
-                        builder.set(new CaptureRequest.Key<>(name, Long.class), longs[0]);
-                    }
-                    return;
+                    typed = array ? a : (Object) a[0];
+                    break;
                 }
                 case "float": {
-                    float[] floats = new float[n];
+                    float[] a = new float[n];
                     for (int i = 0; i < n; ++i) {
-                        floats[i] = number(array ? ((JSONArray) v).opt(i) : v).floatValue();
+                        a[i] = nums[i].floatValue();
                     }
-                    if (array) {
-                        builder.set(new CaptureRequest.Key<>(name, float[].class), floats);
-                    } else {
-                        builder.set(new CaptureRequest.Key<>(name, Float.class), floats[0]);
-                    }
-                    return;
+                    typed = array ? a : (Object) a[0];
+                    break;
                 }
                 case "double": {
-                    double[] doubles = new double[n];
+                    double[] a = new double[n];
                     for (int i = 0; i < n; ++i) {
-                        doubles[i] = number(array ? ((JSONArray) v).opt(i) : v).doubleValue();
+                        a[i] = nums[i].doubleValue();
                     }
-                    if (array) {
-                        builder.set(new CaptureRequest.Key<>(name, double[].class), doubles);
-                    } else {
-                        builder.set(new CaptureRequest.Key<>(name, Double.class), doubles[0]);
-                    }
-                    return;
+                    typed = array ? a : (Object) a[0];
+                    break;
                 }
                 default:
                     throw new StillException("bad_command", "vendor key " + name + ": unknown type " + type);
             }
+            set(builder, typed);
+        }
+
+        /** The framework resolves the tag's marshaler from the value's class (Byte / byte[] / Integer / ...). */
+        @SuppressWarnings("unchecked")
+        private void set(CaptureRequest.Builder builder, Object typed) {
+            builder.set(new CaptureRequest.Key<>(name, (Class<Object>) typed.getClass()), typed);
         }
 
         private Number number(Object v) throws StillException {
@@ -262,7 +254,8 @@ final class StillSession implements AutoCloseable {
     private Handler handler;
     private Executor executor;
     private CameraCharacteristics characteristics;
-    private CameraCharacteristics stillCharacteristics; // the physical camera's when one is selected, else the logical camera's
+    private String physicalId; // the physical camera the JPEG and RAW streams come from; null: the logical camera
+    private CameraCharacteristics stillCharacteristics; // that camera's characteristics (the logical camera's when none is selected)
     private boolean afOffSupported;
     private float focusRequest = Float.NaN; // the clamped LENS_FOCUS_DISTANCE, NaN: not set
     private Range<Integer> fpsRange;
@@ -299,16 +292,18 @@ final class StillSession implements AutoCloseable {
                 throw new StillException("config_unsupported", "camera " + options.cameraId + " not found (cameras: " + Arrays.toString(ids) + ")");
             }
             characteristics = manager.getCameraCharacteristics(options.cameraId);
+            physicalId = options.physicalCameraId.isEmpty() ? null : options.physicalCameraId;
             stillCharacteristics = characteristics;
-            if (!options.physicalCameraId.isEmpty()) {
-                if (!characteristics.getPhysicalCameraIds().contains(options.physicalCameraId)) {
-                    throw new StillException("config_unsupported", "camera " + options.cameraId + " has no physical camera "
-                            + options.physicalCameraId + " (has " + characteristics.getPhysicalCameraIds() + ")");
+            if (physicalId != null) {
+                if (!characteristics.getPhysicalCameraIds().contains(physicalId)) {
+                    throw new StillException("config_unsupported", "camera " + options.cameraId + " has no physical camera " + physicalId
+                            + " (has " + characteristics.getPhysicalCameraIds() + ")");
                 }
-                stillCharacteristics = manager.getCameraCharacteristics(options.physicalCameraId);
+                stillCharacteristics = manager.getCameraCharacteristics(physicalId);
             }
-            afOffSupported = CameraProbe.afOffSupported(characteristics);
-            focusRequest = Selection.clampFocus(options.focusDistance, characteristics.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE));
+            // focus, AF, OIS and the processing modes are the still camera's; AE (fps range) is the logical session's
+            afOffSupported = CameraProbe.afOffSupported(stillCharacteristics);
+            focusRequest = Selection.clampFocus(options.focusDistance, stillCharacteristics.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE));
             fpsRange = CameraProbe.fpsRange(characteristics, options.fpsRange);
             if (fpsRange == null) {
                 Protocol.log("warn", "no AE fps range matches '" + options.fpsRange + "'; using the template's");
@@ -317,8 +312,15 @@ final class StillSession implements AutoCloseable {
             if (!Float.isNaN(options.focusDistance) && !afOffSupported) {
                 Protocol.log("warn", "camera " + options.cameraId + " cannot disable autofocus; focus_distance ignored");
             }
-            rawFormat = rawFormat(options.rawFormat);
-            rawMax = rawPixelMode(options.rawPixelMode);
+            int format = Selection.mode(options.rawFormat, RAW_FORMATS);
+            if (format < 0) {
+                throw new StillException("bad_command", "raw_format must be one of " + Arrays.toString(RAW_FORMATS) + ": " + options.rawFormat);
+            }
+            rawFormat = RAW_IMAGE_FORMATS[format];
+            rawMax = "max".equals(options.rawPixelMode);
+            if (!rawMax && !"default".equals(options.rawPixelMode)) {
+                throw new StillException("bad_command", "raw_pixel_mode must be default or max: " + options.rawPixelMode);
+            }
             vendorKeys = VendorKey.fromJson(options.vendor);
 
             File dir = new File(options.dir);
@@ -327,9 +329,8 @@ final class StillSession implements AutoCloseable {
             }
             if (options.raw) {
                 Metadata.write(new File(dir, "characteristics-" + options.cameraId + ".json"), Metadata.characteristics(characteristics));
-                if (stillCharacteristics != characteristics) {
-                    Metadata.write(new File(dir, "characteristics-" + options.physicalCameraId + ".json"),
-                            Metadata.characteristics(stillCharacteristics));
+                if (physicalId != null) {
+                    Metadata.write(new File(dir, "characteristics-" + physicalId + ".json"), Metadata.characteristics(stillCharacteristics));
                 }
             }
 
@@ -379,15 +380,15 @@ final class StillSession implements AutoCloseable {
             Protocol.put(ready, "preview_size", CameraProbe.size(previewSize));
             Protocol.put(ready, "raw_size", rawSize == null ? null : CameraProbe.size(rawSize));
             Protocol.put(ready, "raw_format", rawSize == null ? null : options.rawFormat);
-            Protocol.put(ready, "raw_pixel_mode", rawSize == null ? null : (rawMax ? "max" : "default"));
-            Protocol.put(ready, "physical_camera_id", options.physicalCameraId.isEmpty() ? null : options.physicalCameraId);
+            Protocol.put(ready, "raw_pixel_mode", rawSize == null ? null : options.rawPixelMode);
+            Protocol.put(ready, "physical_camera_id", physicalId);
             Protocol.put(ready, "fps_range", fpsRange == null ? null : Protocol.array(fpsRange.getLower(), fpsRange.getUpper()));
             Protocol.put(ready, "af_off_supported", afOffSupported);
             Protocol.put(ready, "focus_distance_requested", options.focusDistance);
             Protocol.put(ready, "ois_requested", options.ois);
-            Protocol.put(ready, "min_focus_distance", characteristics.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE));
+            Protocol.put(ready, "min_focus_distance", stillCharacteristics.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE));
             Protocol.put(ready, "focus_calibration",
-                    CameraProbe.focusCalibration(characteristics.get(CameraCharacteristics.LENS_INFO_FOCUS_DISTANCE_CALIBRATION)));
+                    CameraProbe.focusCalibration(stillCharacteristics.get(CameraCharacteristics.LENS_INFO_FOCUS_DISTANCE_CALIBRATION)));
             Protocol.put(ready, "converged", converged.reached);
             Protocol.put(ready, "converge_ms", convergeMs);
             Protocol.put(ready, "lock_confirmed", lockConfirmed);
@@ -426,7 +427,7 @@ final class StillSession implements AutoCloseable {
         try {
             checkDevice();
             drainImages();
-            CaptureRequest.Builder builder = requestBuilder(CameraDevice.TEMPLATE_STILL_CAPTURE, true);
+            CaptureRequest.Builder builder = stillRequest();
             if (jpeg) {
                 builder.addTarget(jpegReader.getSurface());
             }
@@ -436,7 +437,7 @@ final class StillSession implements AutoCloseable {
                     builder.set(CaptureRequest.SENSOR_PIXEL_MODE, CameraMetadata.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION);
                 }
             }
-            apply3A(builder, options.lock, true);
+            apply3A(builder, options.lock);
             applyProcessing(builder, shotOptions);
             builder.set(CaptureRequest.JPEG_QUALITY, (byte) 100);
             builder.set(CaptureRequest.JPEG_ORIENTATION, 0);
@@ -492,17 +493,17 @@ final class StillSession implements AutoCloseable {
                         height = raw.getHeight();
                     }
                     JSONObject meta = Metadata.total(result);
-                    Protocol.put(meta, "format", rawFormatName(rawFormat));
+                    Protocol.put(meta, "format", options.rawFormat);
                     Protocol.put(meta, "width", raw.getWidth());
                     Protocol.put(meta, "height", raw.getHeight());
                     Protocol.put(meta, "row_stride", raw.getPlanes()[0].getRowStride());
                     Protocol.put(meta, "pixel_stride", raw.getPlanes()[0].getPixelStride());
-                    Protocol.put(meta, "pixel_mode", rawMax ? "max" : "default");
+                    Protocol.put(meta, "pixel_mode", options.rawPixelMode);
                     if (rawFormat == ImageFormat.RAW_SENSOR) {
                         rawFile = new File(options.dir, name + ".dng");
                         rawBytes = writeDng(raw, result, rawFile);
                     } else {
-                        rawFile = new File(options.dir, name + "." + rawFormatName(rawFormat));
+                        rawFile = new File(options.dir, name + "." + options.rawFormat);
                         rawBytes = write(raw, rawFile);
                     }
                     Protocol.put(meta, "raw_file", rawFile.getName());
@@ -629,7 +630,6 @@ final class StillSession implements AutoCloseable {
     private void configure() throws StillException, CameraAccessException, InterruptedException {
         StreamConfigurationMap logicalMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
         StreamConfigurationMap map = stillCharacteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
-        String physical = options.physicalCameraId.isEmpty() ? null : options.physicalCameraId;
         List<Size> candidates = jpegCandidates(CameraProbe.outputSizes(map, ImageFormat.JPEG),
                 CameraProbe.highResolutionSizes(map, ImageFormat.JPEG));
         for (int i = 0; i < candidates.size(); ++i) {
@@ -641,8 +641,8 @@ final class StillSession implements AutoCloseable {
             createReaders(size, preview);
             CompletableFuture<CameraCaptureSession> configured = new CompletableFuture<>();
             OutputConfiguration jpegOutput = new OutputConfiguration(jpegReader.getSurface());
-            if (physical != null) {
-                jpegOutput.setPhysicalCameraId(physical);
+            if (physicalId != null) {
+                jpegOutput.setPhysicalCameraId(physicalId);
             }
             List<OutputConfiguration> outputs = new ArrayList<>(Arrays.asList(new OutputConfiguration(previewReader.getSurface()), jpegOutput));
             Size raw = null;
@@ -651,14 +651,14 @@ final class StillSession implements AutoCloseable {
                 raw = CameraProbe.largest(CameraProbe.outputSizes(rawMap, rawFormat));
                 if (raw == null) {
                     closeReaders();
-                    throw new StillException("config_unsupported", "camera " + options.cameraId + " offers no " + rawFormatName(rawFormat).toUpperCase()
+                    throw new StillException("config_unsupported", "camera " + options.cameraId + " offers no " + options.rawFormat.toUpperCase()
                             + " output" + (rawMax ? " at maximum resolution" : ""));
                 }
                 rawReader = ImageReader.newInstance(raw.getWidth(), raw.getHeight(), rawFormat, 2);
                 rawReader.setOnImageAvailableListener(reader -> queue(reader, rawImages, "RAW"), handler);
                 OutputConfiguration rawOutput = new OutputConfiguration(rawReader.getSurface());
-                if (physical != null) {
-                    rawOutput.setPhysicalCameraId(physical);
+                if (physicalId != null) {
+                    rawOutput.setPhysicalCameraId(physicalId);
                 }
                 if (rawMax) {
                     rawOutput.addSensorPixelModeUsed(CameraMetadata.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION);
@@ -668,8 +668,8 @@ final class StillSession implements AutoCloseable {
                 }
                 outputs.add(rawOutput);
             }
-            String description = (physical == null ? "" : "physical camera " + physical + ": ") + "JPEG " + size + " + YUV " + preview
-                    + (raw == null ? "" : " + " + rawFormatName(rawFormat).toUpperCase() + " " + raw + (rawMax ? " (maximum resolution)" : ""));
+            String description = (physicalId == null ? "" : "physical camera " + physicalId + ": ") + "JPEG " + size + " + YUV " + preview
+                    + (raw == null ? "" : " + " + options.rawFormat.toUpperCase() + " " + raw + (rawMax ? " (maximum resolution)" : ""));
             SessionConfiguration config = new SessionConfiguration(SessionConfiguration.SESSION_REGULAR, outputs, executor,
                     new CameraCaptureSession.StateCallback() {
                         @Override
@@ -685,25 +685,25 @@ final class StillSession implements AutoCloseable {
                         }
                     });
             if (!vendorKeys.isEmpty()) {
-                CaptureRequest.Builder params = requestBuilder(CameraDevice.TEMPLATE_PREVIEW, false);
+                CaptureRequest.Builder params = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
                 applyVendor(params);
                 config.setSessionParameters(params.build());
             }
             if (!isSupported(config)) {
-                if (rawMax) {
-                    // the maximum-resolution mix is outside the guaranteed combinations; the HAL decides
-                    Protocol.log("warn", description + " is not reported as supported; trying anyway");
-                } else {
-                    closeReaders();
-                    if (i < candidates.size() - 1) {
-                        Protocol.log("info", description + " is not supported; trying a smaller JPEG size");
-                        continue;
-                    }
-                    throw new StillException("config_unsupported", description + " is not a supported configuration");
-                }
+                // outside the guaranteed combinations (a maximum-resolution or physical-camera mix always is); the HAL decides
+                Protocol.log("info", description + " is not reported as supported; trying it");
             }
             device.createCaptureSession(config);
-            session = await(configured, OPEN_TIMEOUT_MS, "session configuration");
+            try {
+                session = await(configured, OPEN_TIMEOUT_MS, "session configuration");
+            } catch (StillException e) {
+                closeReaders();
+                if ("config_unsupported".equals(e.getCode()) && i < candidates.size() - 1) {
+                    Protocol.log("info", description + " failed to configure; trying a smaller JPEG size");
+                    continue;
+                }
+                throw e;
+            }
             jpegSize = size;
             previewSize = preview;
             rawSize = raw;
@@ -782,9 +782,9 @@ final class StillSession implements AutoCloseable {
     }
 
     private void setRepeating(boolean lock) throws CameraAccessException {
-        CaptureRequest.Builder builder = requestBuilder(CameraDevice.TEMPLATE_PREVIEW, false);
+        CaptureRequest.Builder builder = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
         builder.addTarget(previewReader.getSurface());
-        apply3A(builder, lock, false);
+        apply3A(builder, lock);
         builder.setTag(lock ? TAG_LOCK : TAG_CONVERGE);
         results.clear();
         collecting = true;
@@ -800,14 +800,18 @@ final class StillSession implements AutoCloseable {
     }
 
     /**
-     * A request builder; with `physical`, one that carries per-physical-camera keys for the selected physical camera (the camera
-     * service only accepts those on a request that targets one of that camera's streams: the still request, not the preview).
+     * The still request's builder. With a physical camera selected it carries that camera's focus key too: the camera service
+     * accepts per-physical-camera keys only on a request that targets one of that camera's streams (the still, not the preview).
      */
-    private CaptureRequest.Builder requestBuilder(int template, boolean physical) throws CameraAccessException {
-        if (!physical || options.physicalCameraId.isEmpty()) {
-            return device.createCaptureRequest(template);
+    private CaptureRequest.Builder stillRequest() throws CameraAccessException {
+        if (physicalId == null) {
+            return device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
         }
-        return device.createCaptureRequest(template, Collections.singleton(options.physicalCameraId));
+        CaptureRequest.Builder builder = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE, Collections.singleton(physicalId));
+        if (afOffSupported && !Float.isNaN(focusRequest) && (options.afOff || !Float.isNaN(options.focusDistance))) {
+            builder.setPhysicalCameraKey(CaptureRequest.LENS_FOCUS_DISTANCE, focusRequest, physicalId);
+        }
+        return builder;
     }
 
     private void applyVendor(CaptureRequest.Builder builder) {
@@ -820,44 +824,7 @@ final class StillSession implements AutoCloseable {
         }
     }
 
-    private static int rawFormat(String name) throws StillException {
-        switch (name) {
-            case "sensor":
-                return ImageFormat.RAW_SENSOR;
-            case "raw10":
-                return ImageFormat.RAW10;
-            case "raw12":
-                return ImageFormat.RAW12;
-            default:
-                throw new StillException("bad_command", "raw_format must be sensor, raw10 or raw12: " + name);
-        }
-    }
-
-    private static String rawFormatName(int format) {
-        switch (format) {
-            case ImageFormat.RAW_SENSOR:
-                return "sensor";
-            case ImageFormat.RAW10:
-                return "raw10";
-            case ImageFormat.RAW12:
-                return "raw12";
-            default:
-                return String.valueOf(format);
-        }
-    }
-
-    private static boolean rawPixelMode(String name) throws StillException {
-        switch (name) {
-            case "default":
-                return false;
-            case "max":
-                return true;
-            default:
-                throw new StillException("bad_command", "raw_pixel_mode must be default or max: " + name);
-        }
-    }
-
-    private void apply3A(CaptureRequest.Builder builder, boolean lock, boolean physical) {
+    private void apply3A(CaptureRequest.Builder builder, boolean lock) {
         builder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO);
         builder.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON);
         builder.set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_AUTO);
@@ -869,11 +836,8 @@ final class StillSession implements AutoCloseable {
             builder.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF);
             if (!Float.isNaN(focusRequest)) {
                 builder.set(CaptureRequest.LENS_FOCUS_DISTANCE, focusRequest);
-                if (physical && !options.physicalCameraId.isEmpty()) {
-                    builder.setPhysicalCameraKey(CaptureRequest.LENS_FOCUS_DISTANCE, focusRequest, options.physicalCameraId);
-                }
             }
-        } else if (CameraProbe.hasAfMode(characteristics, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)) {
+        } else if (CameraProbe.hasAfMode(stillCharacteristics, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)) {
             builder.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
         }
         builder.set(CaptureRequest.CONTROL_AE_LOCK, lock);
@@ -922,7 +886,7 @@ final class StillSession implements AutoCloseable {
     }
 
     private void requireMode(int mode, String name, CameraCharacteristics.Key<int[]> key, String what) throws StillException {
-        int[] available = characteristics.get(key);
+        int[] available = stillCharacteristics.get(key);
         if (mode < 0 || available == null || Arrays.stream(available).noneMatch(m -> m == mode)) {
             throw new StillException("config_unsupported", what + " mode '" + name + "' is not offered (" + Arrays.toString(available) + ")");
         }
@@ -964,16 +928,16 @@ final class StillSession implements AutoCloseable {
         }
     }
 
-    /** The lens state that matters for the stills: the selected physical camera's when it reports one, else the logical one. */
+    /** The result the stills come from: the selected physical camera's when it reports one, else the logical one. */
+    private CaptureResult stillResult(TotalCaptureResult r) {
+        CaptureResult physical = physicalId == null ? null : r.getPhysicalCameraResults().get(physicalId);
+        return physical != null ? physical : r;
+    }
+
+    /** The lens state that matters for the stills (the still camera's when it reports one). */
     private Integer lensState(CaptureResult r) {
-        if (!options.physicalCameraId.isEmpty() && r instanceof TotalCaptureResult) {
-            CaptureResult physical = ((TotalCaptureResult) r).getPhysicalCameraResults().get(options.physicalCameraId);
-            Integer state = physical == null ? null : physical.get(CaptureResult.LENS_STATE);
-            if (state != null) {
-                return state;
-            }
-        }
-        return r.get(CaptureResult.LENS_STATE);
+        Integer state = r instanceof TotalCaptureResult ? stillResult((TotalCaptureResult) r).get(CaptureResult.LENS_STATE) : null;
+        return state != null ? state : r.get(CaptureResult.LENS_STATE);
     }
 
     private static String states(CaptureResult r) {
@@ -999,32 +963,21 @@ final class StillSession implements AutoCloseable {
     private static int write(Image image, File file) throws IOException {
         ByteBuffer buffer = image.getPlanes()[0].getBuffer();
         int bytes = buffer.remaining();
-        File part = new File(file.getPath() + ".part");
+        File part = Metadata.part(file);
         try (FileOutputStream out = new FileOutputStream(part)) {
             IO.writeFully(out.getFD(), buffer);
         }
-        if (!part.renameTo(file)) {
-            throw new IOException("cannot rename " + part + " to " + file.getName());
-        }
+        Metadata.commit(part, file);
         return bytes;
     }
 
     private long writeDng(Image image, TotalCaptureResult result, File file) throws IOException {
-        File part = new File(file.getPath() + ".part");
-        CaptureResult stillResult = result;
-        if (stillCharacteristics != characteristics) {
-            CaptureResult physical = result.getPhysicalCameraResults().get(options.physicalCameraId);
-            if (physical != null) {
-                stillResult = physical;
-            }
-        }
-        try (DngCreator dng = new DngCreator(stillCharacteristics, stillResult);
+        File part = Metadata.part(file);
+        try (DngCreator dng = new DngCreator(stillCharacteristics, stillResult(result));
                 OutputStream out = new BufferedOutputStream(new FileOutputStream(part), 1 << 20)) {
             dng.writeImage(out, image);
         }
-        if (!part.renameTo(file)) {
-            throw new IOException("cannot rename " + part + " to " + file.getName());
-        }
+        Metadata.commit(part, file);
         return file.length();
     }
 
@@ -1052,9 +1005,7 @@ final class StillSession implements AutoCloseable {
         Protocol.put(o, "lens_state", CameraProbe.lensState(r.get(CaptureResult.LENS_STATE)));
         Protocol.put(o, "ae_state", CameraProbe.aeState(r.get(CaptureResult.CONTROL_AE_STATE)));
         Protocol.put(o, "awb_state", CameraProbe.awbState(r.get(CaptureResult.CONTROL_AWB_STATE)));
-        RggbChannelVector gains = r.get(CaptureResult.COLOR_CORRECTION_GAINS);
-        Protocol.put(o, "awb_gains",
-                gains == null ? null : Protocol.array(gains.getRed(), gains.getGreenEven(), gains.getGreenOdd(), gains.getBlue()));
+        Protocol.put(o, "awb_gains", Metadata.encode(r.get(CaptureResult.COLOR_CORRECTION_GAINS)));
         // digital gain after the sensor, part of AE on some HALs (the Pixel): not in exposure x ISO
         Protocol.put(o, "post_raw_boost", r.get(CaptureResult.CONTROL_POST_RAW_SENSITIVITY_BOOST));
         Protocol.put(o, "noise_reduction_mode", CameraProbe.name(r.get(CaptureResult.NOISE_REDUCTION_MODE), Selection.NOISE_REDUCTION_MODES));
@@ -1062,27 +1013,15 @@ final class StillSession implements AutoCloseable {
         Integer ois = r.get(CaptureResult.LENS_OPTICAL_STABILIZATION_MODE);
         Protocol.put(o, "ois_mode", ois == null ? null : ois == CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON ? "on" : "off");
         // where the HAL puts the lens for this frame: optical centre (fx, fy, cx, cy, skew), pose, crop
-        Protocol.put(o, "lens_intrinsics", floats(r.get(CaptureResult.LENS_INTRINSIC_CALIBRATION)));
-        Protocol.put(o, "lens_pose_translation", floats(r.get(CaptureResult.LENS_POSE_TRANSLATION)));
-        Protocol.put(o, "lens_pose_rotation", floats(r.get(CaptureResult.LENS_POSE_ROTATION)));
-        Rect crop = r.get(CaptureResult.SCALER_CROP_REGION);
-        Protocol.put(o, "crop_region", crop == null ? null : Protocol.array(crop.left, crop.top, crop.width(), crop.height()));
+        Protocol.put(o, "lens_intrinsics", Metadata.encode(r.get(CaptureResult.LENS_INTRINSIC_CALIBRATION)));
+        Protocol.put(o, "lens_pose_translation", Metadata.encode(r.get(CaptureResult.LENS_POSE_TRANSLATION)));
+        Protocol.put(o, "lens_pose_rotation", Metadata.encode(r.get(CaptureResult.LENS_POSE_ROTATION)));
+        Protocol.put(o, "crop_region", Metadata.encode(r.get(CaptureResult.SCALER_CROP_REGION)));
         Protocol.put(o, "active_physical_id", r.get(CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID));
         Integer pixelMode = r.get(CaptureResult.SENSOR_PIXEL_MODE);
         Protocol.put(o, "pixel_mode", pixelMode == null ? null : pixelMode == CameraMetadata.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION ? "max" : "default");
         Protocol.put(o, "sensor_timestamp", r.get(CaptureResult.SENSOR_TIMESTAMP));
         Protocol.put(o, "frame_number", r.getFrameNumber());
-    }
-
-    private static JSONArray floats(float[] values) {
-        if (values == null) {
-            return null;
-        }
-        Object[] boxed = new Object[values.length];
-        for (int i = 0; i < values.length; i++) {
-            boxed[i] = values[i];
-        }
-        return Protocol.array(boxed);
     }
 
     private <T> T await(CompletableFuture<T> future, long timeoutMs, String what) throws StillException, InterruptedException {
@@ -1117,14 +1056,7 @@ final class StillSession implements AutoCloseable {
         } else {
             code = "internal";
         }
-        String message = what + ": " + (e.getMessage() != null ? e.getMessage() : e.toString());
-        if ("internal".equals(code)) {
-            StackTraceElement[] trace = e.getStackTrace();
-            for (int i = 0; i < Math.min(3, trace.length); ++i) {
-                message += " | at " + trace[i];
-            }
-        }
-        return new StillException(code, message, e);
+        return new StillException(code, what + ": " + (e.getMessage() != null ? e.getMessage() : e.toString()), e);
     }
 
     private static int deviceErrorReason(int error) {

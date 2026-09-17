@@ -80,10 +80,19 @@ final class Metadata {
     }
 
     static void write(File file, JSONObject o) throws IOException {
-        File part = new File(file.getPath() + ".part");
+        File part = part(file);
         try (Writer out = new OutputStreamWriter(new FileOutputStream(part), StandardCharsets.UTF_8)) {
             out.write(o.toString());
         }
+        commit(part, file);
+    }
+
+    /** Atomic file writes: write to part(file), then commit(part, file). */
+    static File part(File file) {
+        return new File(file.getPath() + ".part");
+    }
+
+    static void commit(File part, File file) throws IOException {
         if (!part.renameTo(file)) {
             throw new IOException("cannot rename " + part + " to " + file.getName());
         }
@@ -104,7 +113,7 @@ final class Metadata {
             return Protocol.array(r.left, r.top, r.width(), r.height());
         }
         if (v instanceof Size) {
-            return Protocol.array(((Size) v).getWidth(), ((Size) v).getHeight());
+            return CameraProbe.size((Size) v);
         }
         if (v instanceof SizeF) {
             return Protocol.array(((SizeF) v).getWidth(), ((SizeF) v).getHeight());

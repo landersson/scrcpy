@@ -182,7 +182,7 @@ public final class StillServer {
                     throw new StillException("bad_command", "unknown command: " + cmd);
             }
         } catch (StillException e) {
-            Protocol.error(id, e.getCode(), e.getMessage(), false);
+            Protocol.error(id, e, false);
             if ("camera_disconnected".equals(e.getCode()) && session != null) {
                 session.close();
                 return null;

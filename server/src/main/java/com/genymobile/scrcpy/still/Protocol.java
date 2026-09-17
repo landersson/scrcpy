@@ -69,10 +69,27 @@ final class Protocol {
     }
 
     static void error(Integer id, String code, String message, boolean fatal) {
+        error(id, code, message, fatal, null);
+    }
+
+    /** A StillException as an error event, with the top frames of its cause (or itself) in "trace". */
+    static void error(Integer id, StillException e, boolean fatal) {
+        error(id, e.getCode(), e.getMessage(), fatal, e.getCause() != null ? e.getCause() : e);
+    }
+
+    private static void error(Integer id, String code, String message, boolean fatal, Throwable trace) {
         JSONObject o = event("error", id);
         put(o, "code", code);
         put(o, "message", message);
         put(o, "fatal", fatal);
+        if (trace != null) {
+            StackTraceElement[] frames = trace.getStackTrace();
+            JSONArray top = new JSONArray();
+            for (int i = 0; i < Math.min(3, frames.length); ++i) {
+                top.put(String.valueOf(frames[i]));
+            }
+            put(o, "trace", top);
+        }
         send(o);
     }
 
