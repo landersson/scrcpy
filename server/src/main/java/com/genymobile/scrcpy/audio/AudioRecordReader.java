@@ -2,6 +2,7 @@ package com.genymobile.scrcpy.audio;
 
 import com.genymobile.scrcpy.AndroidVersions;
 import com.genymobile.scrcpy.util.Ln;
+import com.genymobile.scrcpy.util.TsDbg;
 
 import android.annotation.TargetApi;
 import android.media.AudioRecord;
@@ -21,6 +22,7 @@ public class AudioRecordReader {
     private long previousRecorderTimestamp = -1;
     private long previousPts = 0;
     private long nextPts = 0;
+    private long totalBytesRead;
 
     public AudioRecordReader(AudioRecord recorder) {
         this.recorder = recorder;
@@ -32,6 +34,7 @@ public class AudioRecordReader {
         if (r <= 0) {
             return r;
         }
+        totalBytesRead += r;
 
         long pts;
 
@@ -60,6 +63,14 @@ public class AudioRecordReader {
             pts = previousPts + ONE_SAMPLE_US;
         }
         previousPts = pts;
+
+        int dbg = TsDbg.next(TsDbg.AUDIO_READ);
+        if (dbg >= 0) {
+            // mono - tsNano is how far in the past AudioRecord claims these samples were captured
+            TsDbg.log("audio-read", "n=" + dbg + " bytes=" + r + " totalBytes=" + totalBytesRead
+                    + " getTimestamp=" + ret + " tsNano=" + (timestamp.nanoTime / 1000)
+                    + " tsFramePos=" + timestamp.framePosition + " pts=" + pts);
+        }
 
         outBufferInfo.set(0, r, pts, 0);
         return r;

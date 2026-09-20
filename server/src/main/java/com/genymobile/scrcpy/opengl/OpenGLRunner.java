@@ -2,6 +2,7 @@ package com.genymobile.scrcpy.opengl;
 
 import com.genymobile.scrcpy.model.Size;
 import com.genymobile.scrcpy.util.Threads;
+import com.genymobile.scrcpy.util.TsDbg;
 
 import android.graphics.SurfaceTexture;
 import android.opengl.EGL14;
@@ -193,7 +194,12 @@ public final class OpenGLRunner {
 
         filter.draw(textureId, matrix);
 
-        EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, surfaceTexture.getTimestamp());
+        long texTimestamp = surfaceTexture.getTimestamp();
+        int dbg = TsDbg.next(TsDbg.GL_FRAME);
+        if (dbg >= 0) {
+            TsDbg.log("gl-frame", "n=" + dbg + " texTs=" + (texTimestamp / 1000));
+        }
+        EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, texTimestamp);
         EGL14.eglSwapBuffers(eglDisplay, eglSurface);
     }
 

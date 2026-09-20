@@ -11,6 +11,7 @@ import com.genymobile.scrcpy.util.CodecUtils;
 import com.genymobile.scrcpy.util.IO;
 import com.genymobile.scrcpy.util.Ln;
 import com.genymobile.scrcpy.util.LogUtils;
+import com.genymobile.scrcpy.util.TsDbg;
 
 import android.annotation.TargetApi;
 import android.media.MediaCodec;
@@ -232,6 +233,7 @@ public final class AudioEncoder implements AsyncProcessor {
             mediaCodec.setCallback(new EncoderCallback(), new Handler(mediaCodecThread.getLooper()));
             mediaCodec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
 
+            TsDbg.log("audio-capture-start", "");
             capture.start();
 
             final MediaCodec mediaCodecRef = mediaCodec;

@@ -12,6 +12,7 @@ import com.genymobile.scrcpy.util.CodecUtils;
 import com.genymobile.scrcpy.util.IO;
 import com.genymobile.scrcpy.util.Ln;
 import com.genymobile.scrcpy.util.LogUtils;
+import com.genymobile.scrcpy.util.TsDbg;
 
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
@@ -127,6 +128,7 @@ public class SurfaceEncoder implements AsyncProcessor {
                     mediaCodec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
                     surface = mediaCodec.createInputSurface();
 
+                    TsDbg.log("video-capture-start", "size=" + size);
                     capture.start(surface);
                     captureStarted = true;
 
@@ -264,6 +266,13 @@ public class SurfaceEncoder implements AsyncProcessor {
                         // If this is not a config packet, then it contains a frame
                         firstFrameSent = true;
                         consecutiveErrors = 0;
+                    }
+
+                    int dbg = TsDbg.next(TsDbg.VIDEO_PACKET);
+                    if (dbg >= 0) {
+                        // pts is the camera's frame timestamp, passed through the encoder untouched
+                        TsDbg.log("video-packet", "n=" + dbg + " pts=" + bufferInfo.presentationTimeUs
+                                + " size=" + bufferInfo.size + " config=" + isConfig);
                     }
 
                     ByteBuffer codecBuffer = codec.getOutputBuffer(outputBufferId);

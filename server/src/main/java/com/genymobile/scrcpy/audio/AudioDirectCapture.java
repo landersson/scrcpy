@@ -4,6 +4,7 @@ import com.genymobile.scrcpy.AndroidVersions;
 import com.genymobile.scrcpy.FakeContext;
 import com.genymobile.scrcpy.Workarounds;
 import com.genymobile.scrcpy.util.Ln;
+import com.genymobile.scrcpy.util.TsDbg;
 import com.genymobile.scrcpy.wrappers.ServiceManager;
 
 import android.annotation.SuppressLint;
@@ -101,6 +102,7 @@ public class AudioDirectCapture implements AudioCapture {
             recorder = Workarounds.createAudioRecord(audioSource, SAMPLE_RATE, CHANNEL_CONFIG, CHANNELS, CHANNEL_MASK, ENCODING);
         }
         recorder.startRecording();
+        TsDbg.log("audio-start", "source=" + audioSource + " state=" + recorder.getRecordingState());
         reader = new AudioRecordReader(recorder);
     }
 

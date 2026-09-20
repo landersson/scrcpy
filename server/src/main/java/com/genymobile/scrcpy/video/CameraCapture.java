@@ -12,6 +12,7 @@ import com.genymobile.scrcpy.util.AffineMatrix;
 import com.genymobile.scrcpy.util.HandlerExecutor;
 import com.genymobile.scrcpy.util.Ln;
 import com.genymobile.scrcpy.util.LogUtils;
+import com.genymobile.scrcpy.util.TsDbg;
 import com.genymobile.scrcpy.wrappers.ServiceManager;
 
 import android.annotation.SuppressLint;
@@ -26,6 +27,8 @@ import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CameraMetadata;
 import android.hardware.camera2.CaptureFailure;
 import android.hardware.camera2.CaptureRequest;
+import android.hardware.camera2.CaptureResult;
+import android.hardware.camera2.TotalCaptureResult;
 import android.hardware.camera2.params.OutputConfiguration;
 import android.hardware.camera2.params.SessionConfiguration;
 import android.hardware.camera2.params.StreamConfigurationMap;
@@ -312,6 +315,17 @@ public class CameraCapture extends SurfaceCapture {
                 try {
                     characteristics = cameraManager.getCameraCharacteristics(cameraId);
                     zoomRange = characteristics.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE);
+                    TsDbg.log("camera-configured", "id=" + cameraId + " timestampSource="
+                            + characteristics.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE)
+                            + " (0=UNKNOWN/monotonic, 1=REALTIME/boottime)"
+                            + " availableEis=" + java.util.Arrays.toString(
+                                    characteristics.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES))
+                            + " availableOis=" + java.util.Arrays.toString(
+                                    characteristics.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION))
+                            + " availableNr=" + java.util.Arrays.toString(
+                                    characteristics.get(CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES))
+                            + " maxPipelineDepth="
+                            + characteristics.get(CameraCharacteristics.REQUEST_PIPELINE_MAX_DEPTH));
                 } catch (CameraAccessException e) {
                     Ln.w("Could not get camera characteristics");
                 }
@@ -459,7 +473,31 @@ public class CameraCapture extends SurfaceCapture {
         CameraCaptureSession.CaptureCallback callback = new CameraCaptureSession.CaptureCallback() {
             @Override
             public void onCaptureStarted(CameraCaptureSession session, CaptureRequest request, long timestamp, long frameNumber) {
-                // Called for each frame captured, do nothing
+                int dbg = TsDbg.next(TsDbg.CAMERA_FRAME);
+                if (dbg >= 0) {
+                    // timestamp is SENSOR_TIMESTAMP: compare it against mono and boot read here
+                    TsDbg.log("camera-frame", "n=" + dbg + " sensorTs=" + (timestamp / 1000)
+                            + " frameNumber=" + frameNumber);
+                }
+            }
+
+            @Override
+            public void onCaptureCompleted(CameraCaptureSession session, CaptureRequest request, TotalCaptureResult result) {
+                int dbg = TsDbg.next(TsDbg.CAMERA_RESULT);
+                if (dbg >= 0) {
+                    TsDbg.log("camera-result", "n=" + dbg
+                            + " eis=" + result.get(CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE)
+                            + " nr=" + result.get(CaptureResult.NOISE_REDUCTION_MODE)
+                            + " edge=" + result.get(CaptureResult.EDGE_MODE)
+                            + " tonemap=" + result.get(CaptureResult.TONEMAP_MODE)
+                            + " pipelineDepth=" + result.get(CaptureResult.REQUEST_PIPELINE_DEPTH)
+                            + " ois=" + result.get(CaptureResult.LENS_OPTICAL_STABILIZATION_MODE)
+                            + " sensorTs=" + (result.get(CaptureResult.SENSOR_TIMESTAMP) == null ? -1
+                                    : result.get(CaptureResult.SENSOR_TIMESTAMP) / 1000)
+                            + " exposureNs=" + result.get(CaptureResult.SENSOR_EXPOSURE_TIME)
+                            + " frameDurationNs=" + result.get(CaptureResult.SENSOR_FRAME_DURATION)
+                            + " frameNumber=" + result.getFrameNumber());
+                }
             }
 
             @Override
