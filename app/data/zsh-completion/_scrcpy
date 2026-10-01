@@ -22,6 +22,7 @@ arguments=(
     '--background-color=[Set the background color]'
     '--camera-ar=[Select the camera size by its aspect ratio]'
     '--camera-focus-distance=[Set a manual camera focus distance in diopters (0 is infinity)]'
+    '--camera-ois=[Turn optical image stabilization on or off]:value:(on off)'
     '--camera-high-speed=[Enable high-speed camera capture mode]'
     '--camera-id=[Specify the camera id to mirror]'
     '--camera-facing=[Select the device camera by its facing direction]:facing:(front back external)'

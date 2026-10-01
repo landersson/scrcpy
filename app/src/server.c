@@ -378,6 +378,10 @@ execute_server(struct sc_server *server,
     if (params->camera_no_autofocus) {
         ADD_PARAM("camera_no_autofocus=true");
     }
+    if (params->camera_ois) {
+        VALIDATE_STRING(params->camera_ois);
+        ADD_PARAM("camera_ois=%s", params->camera_ois);
+    }
     if (params->show_touches) {
         ADD_PARAM("show_touches=true");
     }

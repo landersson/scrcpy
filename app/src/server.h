@@ -73,6 +73,7 @@ struct sc_server_params {
     bool camera_high_speed;
     bool camera_torch;
     bool camera_no_autofocus;
+    const char *camera_ois;
     bool vd_destroy_content;
     bool vd_system_decorations;
     bool keep_active;

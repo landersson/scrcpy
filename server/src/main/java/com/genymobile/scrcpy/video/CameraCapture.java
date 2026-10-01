@@ -68,6 +68,7 @@ public class CameraCapture extends SurfaceCapture {
     private final boolean highSpeed;
     private final boolean noAutofocus;
     private final float focusDistance;
+    private final String ois;
     private final Rect crop;
     private final Orientation captureOrientation;
     private final float angle;
@@ -105,6 +106,7 @@ public class CameraCapture extends SurfaceCapture {
         this.highSpeed = options.getCameraHighSpeed();
         this.noAutofocus = options.getCameraNoAutofocus();
         this.focusDistance = options.getCameraFocusDistance();
+        this.ois = options.getCameraOis();
         this.crop = options.getCrop();
         this.captureOrientation = options.getCaptureOrientation();
         assert captureOrientation != null;
@@ -351,6 +353,13 @@ public class CameraCapture extends SurfaceCapture {
                             configureManualFocus(requestBuilder, characteristics);
                         } else {
                             Ln.w("Camera characteristics unavailable; ignoring --no-camera-autofocus/--camera-focus-distance");
+                        }
+                    }
+                    if (ois != null) {
+                        if (characteristics != null) {
+                            configureOpticalStabilization(requestBuilder, characteristics);
+                        } else {
+                            Ln.w("Camera characteristics unavailable; ignoring --camera-ois");
                         }
                     }
 
@@ -622,6 +631,29 @@ public class CameraCapture extends SurfaceCapture {
                 Ln.i("Camera focus distance set to " + clamped + " diopters");
             }
         }
+    }
+
+    /** LENS_OPTICAL_STABILIZATION_MODE on or off, as --camera-ois asks, if the lens offers that mode. */
+    private void configureOpticalStabilization(CaptureRequest.Builder requestBuilder, CameraCharacteristics characteristics) {
+        assertCameraThread();
+        int wanted = "on".equals(ois) ? CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON
+                : CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_OFF;
+        int[] modes = characteristics.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION);
+        boolean offered = false;
+        if (modes != null) {
+            for (int mode : modes) {
+                if (mode == wanted) {
+                    offered = true;
+                    break;
+                }
+            }
+        }
+        if (!offered) {
+            Ln.w("Camera '" + cameraId + "' does not offer optical stabilization " + ois + "; --camera-ois ignored");
+            return;
+        }
+        requestBuilder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, wanted);
+        Ln.i("Camera optical stabilization " + ois);
     }
 
     private void assertCameraThread() {

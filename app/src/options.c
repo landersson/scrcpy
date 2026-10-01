@@ -111,6 +111,7 @@ const struct scrcpy_options scrcpy_options_default = {
     .kill_adb_on_close = false,
     .camera_high_speed = false,
     .camera_no_autofocus = false,
+    .camera_ois = NULL,
     .list = 0,
     .window = true,
     .mouse_hover = true,

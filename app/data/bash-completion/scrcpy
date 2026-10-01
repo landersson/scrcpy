@@ -17,6 +17,7 @@ _scrcpy() {
         --camera-id=
         --camera-facing=
         --camera-focus-distance=
+        --camera-ois=
         --camera-fps=
         --camera-high-speed
         --camera-size=
@@ -217,6 +218,7 @@ _scrcpy() {
         |--camera-ar \
         |--camera-id \
         |--camera-focus-distance \
+        |--camera-ois \
         |--camera-fps \
         |--camera-size \
         |--camera-torch \

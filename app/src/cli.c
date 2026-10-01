@@ -85,6 +85,7 @@ enum {
     OPT_CAMERA_FPS,
     OPT_CAMERA_HIGH_SPEED,
     OPT_NO_CAMERA_AUTOFOCUS,
+    OPT_CAMERA_OIS,
     OPT_DISPLAY_ORIENTATION,
     OPT_RECORD_ORIENTATION,
     OPT_ORIENTATION,
@@ -640,6 +641,16 @@ static const struct sc_option options[] = {
         .text = "Disable camera autofocus.\n"
                 "The focus is locked, so it does not follow the scene. Combine "
                 "with --camera-focus-distance to lock to a specific distance.",
+    },
+    {
+        .longopt_id = OPT_CAMERA_OIS,
+        .longopt = "camera-ois",
+        .argdesc = "value",
+        .text = "Turn the camera's optical image stabilization on or off "
+                "(\"on\" or \"off\").\n"
+                "By default the device decides (usually on where the lens has "
+                "it). Ignored, with a warning, if the lens does not offer the "
+                "requested mode.",
     },
     {
         .longopt_id = OPT_NO_CLEANUP,
@@ -2899,6 +2910,13 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
             case OPT_NO_CAMERA_AUTOFOCUS:
                 opts->camera_no_autofocus = true;
                 break;
+            case OPT_CAMERA_OIS:
+                if (strcmp(optarg, "on") && strcmp(optarg, "off")) {
+                    LOGE("Unsupported --camera-ois value: %s (on or off)", optarg);
+                    return false;
+                }
+                opts->camera_ois = optarg;
+                break;
             case OPT_NO_WINDOW:
                 opts->window = false;
                 break;
@@ -3279,6 +3297,7 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
             || opts->camera_high_speed
             || opts->camera_no_autofocus
             || opts->camera_focus_distance
+            || opts->camera_ois
             || opts->camera_size) {
         LOGE("Camera options are only available with --video-source=camera");
         return false;

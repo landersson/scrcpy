@@ -156,6 +156,20 @@ These options require a camera with a controllable lens. A fixed-focus camera
 warning.
 
 
+## Optical image stabilization
+
+By default the device decides whether the lens stabilizes the image (usually it
+does, where the lens has it). To turn it off or on explicitly:
+
+```
+scrcpy --video-source=camera --camera-ois=off
+scrcpy --video-source=camera --camera-ois=on
+```
+
+A lens that does not offer the requested mode ignores the option and logs a
+warning.
+
+
 ## High speed capture
 
 The Android camera API also supports a [high speed capture mode][high speed].

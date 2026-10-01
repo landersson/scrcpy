@@ -124,6 +124,12 @@ This implies disabling autofocus.
 Only cameras with a controllable lens support it (a fixed-focus camera ignores it).
 
 .TP
+.BI "\-\-camera\-ois " value
+Turn the camera's optical image stabilization on or off ("on" or "off").
+
+By default the device decides (usually on where the lens has it). Ignored, with a warning, if the lens does not offer the requested mode.
+
+.TP
 .BI "\-\-camera\-fps " fps
 Specify the camera capture frame rate.
 
