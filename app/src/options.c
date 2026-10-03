@@ -75,6 +75,7 @@ const struct scrcpy_options scrcpy_options_default = {
 #ifdef HAVE_V4L2
     .v4l2_device = NULL,
     .v4l2_buffer = 0,
+    .stdin_control = false,
 #endif
 #ifdef HAVE_USB
     .otg = false,

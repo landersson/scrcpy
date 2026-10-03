@@ -51,6 +51,23 @@ sc_decoder_push(struct sc_decoder *decoder, const AVPacket *packet) {
         return true;
     }
 
+    if (decoder->control) {
+        bool want = atomic_load_explicit(&decoder->control->want_keyframes,
+                                         memory_order_relaxed);
+        bool is_key = packet->flags & AV_PKT_FLAG_KEY;
+        bool next = sc_decode_mode_next(decoder->keyframes_only, want, is_key);
+        if (next != decoder->keyframes_only) {
+            // Every packet is still sent: the decoder parses the parameter
+            // sets and decodes the keyframes, and the frame threads' pipeline
+            // keeps moving (sending keyframes alone would delay their output
+            // by one packet per frame thread)
+            decoder->ctx->skip_frame = next ? AVDISCARD_NONKEY
+                                            : AVDISCARD_DEFAULT;
+            decoder->keyframes_only = next;
+            LOGI("Decode mode: %s", next ? "keyframes" : "full");
+        }
+    }
+
     int ret = avcodec_send_packet(decoder->ctx, packet);
     if (ret < 0 && ret != AVERROR(EAGAIN)) {
         LOGE("Decoder '%s': could not send video packet: %d",
@@ -147,6 +164,8 @@ sc_decoder_packet_sink_push_session(struct sc_packet_sink *sink,
 void
 sc_decoder_init(struct sc_decoder *decoder, const char *name) {
     decoder->name = name; // statically allocated
+    decoder->control = NULL;
+    decoder->keyframes_only = false;
     sc_frame_source_init(&decoder->frame_source);
 
     static const struct sc_packet_sink_ops ops = {

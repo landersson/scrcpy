@@ -675,6 +675,12 @@ This option is similar to \fB\-\-video\-buffer\fR, but specific to V4L2 sink.
 Default is 0 (no buffering).
 
 .TP
+.B \-\-stdin\-control
+Read decode mode commands from stdin, one per line: "keyframes" decodes only the video's keyframes (the V4L2 device then gets one frame per keyframe), "full" decodes every frame again from the next keyframe. The stream from the device and the recording are not affected.
+
+Requires \fB\-\-v4l2\-sink\fR.
+
+.TP
 .BI "\-\-video\-buffer " ms
 Add a buffering delay (in milliseconds) before displaying video frames.
 

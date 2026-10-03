@@ -6,6 +6,7 @@
 #include <libavcodec/avcodec.h>
 
 #include "coords.h"
+#include "decode_control.h"
 #include "trait/frame_source.h"
 #include "trait/packet_sink.h"
 
@@ -20,6 +21,10 @@ struct sc_decoder {
 
     struct sc_stream_session session; // only initialized for video stream
     struct sc_size frame_size;
+
+    // --stdin-control: the wanted decode mode (NULL: always decode every frame)
+    struct sc_decode_control *control;
+    bool keyframes_only; // the mode applied (only accessed from push)
 };
 
 // The name must be statically allocated (e.g. a string literal)

@@ -121,6 +121,45 @@ static void test_options2(void) {
     assert(opts->record_format == SC_RECORD_FORMAT_MP4);
 }
 
+#ifdef HAVE_V4L2
+static void test_stdin_control(void) {
+    struct scrcpy_cli_args args = {
+        .opts = scrcpy_options_default,
+        .help = false,
+        .version = false,
+    };
+
+    char *argv[] = {
+        "scrcpy",
+        "--no-control",
+        "--no-video-playback",
+        "--v4l2-sink", "/dev/video0",
+        "--stdin-control",
+    };
+
+    bool ok = scrcpy_parse_args(&args, ARRAY_LEN(argv), argv);
+    assert(ok);
+    assert(args.opts.stdin_control);
+    assert(!strcmp(args.opts.v4l2_device, "/dev/video0"));
+
+    // without the V4L2 sink there is nothing to control
+    struct scrcpy_cli_args args2 = {
+        .opts = scrcpy_options_default,
+        .help = false,
+        .version = false,
+    };
+    char *argv2[] = {
+        "scrcpy",
+        "--no-control",
+        "--no-playback",
+        "--record", "file.mp4",
+        "--stdin-control",
+    };
+    ok = scrcpy_parse_args(&args2, ARRAY_LEN(argv2), argv2);
+    assert(!ok);
+}
+#endif
+
 static void test_parse_shortcut_mods(void) {
     uint8_t mods;
     bool ok;
@@ -157,6 +196,9 @@ int main(int argc, char *argv[]) {
     test_flag_help();
     test_options();
     test_options2();
+#ifdef HAVE_V4L2
+    test_stdin_control();
+#endif
     test_parse_shortcut_mods();
     return 0;
 }

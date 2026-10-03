@@ -95,6 +95,7 @@ _scrcpy() {
         --screen-off-timeout=
         --shortcut-mod=
         --start-app=
+        --stdin-control
         -t --show-touches
         --tcpip
         --tcpip=

@@ -46,6 +46,7 @@ enum {
     OPT_V4L2_SINK,
     OPT_VIDEO_BUFFER,
     OPT_V4L2_BUFFER,
+    OPT_STDIN_CONTROL,
     OPT_TUNNEL_HOST,
     OPT_TUNNEL_PORT,
     OPT_NO_CLIPBOARD_AUTOSYNC,
@@ -998,6 +999,17 @@ static const struct sc_option options[] = {
                 "This option is similar to --video-buffer, but specific to "
                 "V4L2 sink.\n"
                 "Default is 0 (no buffering).\n"
+                "This option is only available on Linux.",
+    },
+    {
+        .longopt_id = OPT_STDIN_CONTROL,
+        .longopt = "stdin-control",
+        .text = "Read decode mode commands from stdin, one per line: "
+                "'keyframes' decodes only the video's keyframes (the V4L2 "
+                "device then gets one frame per keyframe), 'full' decodes "
+                "every frame again from the next keyframe. The stream from "
+                "the device and the recording are not affected.\n"
+                "Requires --v4l2-sink.\n"
                 "This option is only available on Linux.",
     },
     {
@@ -2824,6 +2836,15 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
                      "platform).");
                 return false;
 #endif
+            case OPT_STDIN_CONTROL:
+#ifdef HAVE_V4L2
+                opts->stdin_control = true;
+                break;
+#else
+                LOGE("V4L2 (--stdin-control) is disabled (or unsupported on "
+                     "this platform).");
+                return false;
+#endif
             case OPT_LIST_ENCODERS:
                 opts->list |= SC_OPTION_LIST_ENCODERS;
                 break;
@@ -3098,6 +3119,11 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
 
     if (opts->v4l2_buffer && !opts->v4l2_device) {
         LOGE("V4L2 buffer value without V4L2 sink");
+        return false;
+    }
+
+    if (opts->stdin_control && !opts->v4l2_device) {
+        LOGE("--stdin-control requires --v4l2-sink");
         return false;
     }
 #endif

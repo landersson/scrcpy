@@ -44,6 +44,7 @@
 #include "util/timeout.h"
 #include "util/tick.h"
 #ifdef HAVE_V4L2
+# include "decode_control.h"
 # include "v4l2_sink.h"
 #endif
 #include "video_regulator.h"
@@ -61,6 +62,7 @@ struct scrcpy {
 #ifdef HAVE_V4L2
     struct sc_v4l2_sink v4l2_sink;
     struct sc_video_regulator v4l2_regulator;
+    struct sc_decode_control decode_control;
 #endif
     struct sc_controller controller;
     struct sc_file_pusher file_pusher;
@@ -356,6 +358,9 @@ scrcpy(struct scrcpy_options *options) {
     bool screen_initialized = false;
     bool timeout_initialized = false;
     bool timeout_started = false;
+#ifdef HAVE_V4L2
+    bool decode_control_started = false;
+#endif
     bool disconnected = false;
 
     struct sc_acksync *acksync = NULL;
@@ -557,6 +562,12 @@ scrcpy(struct scrcpy_options *options) {
         sc_decoder_init(&s->video_decoder, "video");
         sc_packet_source_add_sink(&s->video_demuxer.packet_source,
                                   &s->video_decoder.packet_sink);
+#ifdef HAVE_V4L2
+        if (options->stdin_control) {
+            sc_decode_control_init(&s->decode_control);
+            s->video_decoder.control = &s->decode_control;
+        }
+#endif
     }
     if (needs_audio_decoder) {
         sc_decoder_init(&s->audio_decoder, "audio");
@@ -832,6 +843,15 @@ aoa_complete:
     }
 #endif
 
+#ifdef HAVE_V4L2
+    if (options->stdin_control) {
+        if (!sc_decode_control_start(&s->decode_control)) {
+            goto end;
+        }
+        decode_control_started = true;
+    }
+#endif
+
     // Now that the header values have been consumed, the socket(s) will
     // receive the stream(s). Start the demuxer(s).
 
@@ -918,6 +938,11 @@ end:
     if (timeout_started) {
         sc_timeout_stop(&s->timeout);
     }
+#ifdef HAVE_V4L2
+    if (decode_control_started) {
+        sc_decode_control_stop(&s->decode_control);
+    }
+#endif
 
     // The demuxer is not stopped explicitly, because it will stop by itself on
     // end-of-stream
@@ -956,6 +981,11 @@ end:
         sc_screen_hide_window(&s->screen);
     }
 
+#ifdef HAVE_V4L2
+    if (decode_control_started) {
+        sc_decode_control_join(&s->decode_control);
+    }
+#endif
     if (timeout_started) {
         sc_timeout_join(&s->timeout);
     }

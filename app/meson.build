@@ -103,7 +103,7 @@ add_project_arguments(feature_test_macros, language: 'c')
 
 v4l2_support = get_option('v4l2') and host_machine.system() == 'linux'
 if v4l2_support
-    src += [ 'src/v4l2_sink.c' ]
+    src += [ 'src/decode_control.c', 'src/v4l2_sink.c' ]
 endif
 
 usb_support = get_option('usb')
@@ -260,6 +260,9 @@ if get_option('buildtype') == 'debug'
             'src/control_msg.c',
             'src/util/str.c',
             'src/util/strbuf.c',
+        ]],
+        ['test_decode_control', [
+            'tests/test_decode_control.c',
         ]],
         ['test_device_msg_deserialize', [
             'tests/test_device_msg_deserialize.c',
