@@ -6,9 +6,10 @@
 #include <libavcodec/avcodec.h>
 
 #include "coords.h"
-#include "decode_control.h"
 #include "trait/frame_source.h"
 #include "trait/packet_sink.h"
+
+struct sc_decode_control;
 
 struct sc_decoder {
     struct sc_packet_sink packet_sink; // packet sink trait

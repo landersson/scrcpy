@@ -9,12 +9,6 @@
 #define SC_DECODE_CONTROL_LINE_MAX 256
 #define SC_DECODE_CONTROL_POLL_MS 200
 
-void
-sc_decode_control_init(struct sc_decode_control *dc) {
-    atomic_init(&dc->want_keyframes, false);
-    atomic_init(&dc->stopped, false);
-}
-
 static void
 handle_line(struct sc_decode_control *dc, const char *line, size_t len) {
     switch (sc_decode_control_parse(line, len)) {
@@ -34,8 +28,7 @@ run_decode_control(void *data) {
     struct sc_decode_control *dc = data;
 
     char line[SC_DECODE_CONTROL_LINE_MAX];
-    size_t len = 0;
-    bool overlong = false; // drop the rest of a line that did not fit
+    size_t len = 0; // an overlong line is cut, and then logged as unknown
 
     while (!atomic_load(&dc->stopped)) {
         struct pollfd pfd = {.fd = STDIN_FILENO, .events = POLLIN};
@@ -67,17 +60,11 @@ run_decode_control(void *data) {
         }
 
         for (ssize_t i = 0; i < n; ++i) {
-            char c = buf[i];
-            if (c == '\n') {
-                if (!overlong) {
-                    handle_line(dc, line, len);
-                }
+            if (buf[i] == '\n') {
+                handle_line(dc, line, len);
                 len = 0;
-                overlong = false;
             } else if (len < sizeof(line)) {
-                line[len++] = c;
-            } else {
-                overlong = true;
+                line[len++] = buf[i];
             }
         }
     }
@@ -87,6 +74,8 @@ run_decode_control(void *data) {
 
 bool
 sc_decode_control_start(struct sc_decode_control *dc) {
+    atomic_init(&dc->want_keyframes, false);
+    atomic_init(&dc->stopped, false);
     bool ok = sc_thread_create(&dc->thread, run_decode_control, "scrcpy-stdin",
                                dc);
     if (!ok) {

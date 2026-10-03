@@ -54,9 +54,6 @@ sc_decode_mode_next(bool keyframes_only, bool want_keyframes, bool is_key) {
     return keyframes_only && !is_key;
 }
 
-void
-sc_decode_control_init(struct sc_decode_control *dc);
-
 bool
 sc_decode_control_start(struct sc_decode_control *dc);
 

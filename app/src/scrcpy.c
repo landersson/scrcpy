@@ -562,12 +562,6 @@ scrcpy(struct scrcpy_options *options) {
         sc_decoder_init(&s->video_decoder, "video");
         sc_packet_source_add_sink(&s->video_demuxer.packet_source,
                                   &s->video_decoder.packet_sink);
-#ifdef HAVE_V4L2
-        if (options->stdin_control) {
-            sc_decode_control_init(&s->decode_control);
-            s->video_decoder.control = &s->decode_control;
-        }
-#endif
     }
     if (needs_audio_decoder) {
         sc_decoder_init(&s->audio_decoder, "audio");
@@ -840,15 +834,16 @@ aoa_complete:
         sc_frame_source_add_sink(src, &s->v4l2_sink.frame_sink);
 
         v4l2_sink_initialized = true;
-    }
-#endif
 
-#ifdef HAVE_V4L2
-    if (options->stdin_control) {
-        if (!sc_decode_control_start(&s->decode_control)) {
-            goto end;
+        // --stdin-control requires --v4l2-sink (cli.c); the decoder reads the
+        // control once the demuxers start, below
+        if (options->stdin_control) {
+            s->video_decoder.control = &s->decode_control;
+            if (!sc_decode_control_start(&s->decode_control)) {
+                goto end;
+            }
+            decode_control_started = true;
         }
-        decode_control_started = true;
     }
 #endif
 

@@ -4,6 +4,7 @@
 #include <libavcodec/packet.h>
 #include <libavutil/avutil.h>
 
+#include "decode_control.h"
 #include "util/log.h"
 
 /** Downcast packet_sink to decoder */
