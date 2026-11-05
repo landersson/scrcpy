@@ -113,6 +113,7 @@ const struct scrcpy_options scrcpy_options_default = {
     .camera_high_speed = false,
     .camera_no_autofocus = false,
     .camera_ois = NULL,
+    .camera_controls = NULL,
     .list = 0,
     .window = true,
     .mouse_hover = true,

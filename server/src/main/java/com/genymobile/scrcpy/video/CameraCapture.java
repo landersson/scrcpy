@@ -69,6 +69,7 @@ public class CameraCapture extends SurfaceCapture {
     private final boolean noAutofocus;
     private final float focusDistance;
     private final String ois;
+    private final CameraControls controls;
     private final Rect crop;
     private final Orientation captureOrientation;
     private final float angle;
@@ -107,6 +108,10 @@ public class CameraCapture extends SurfaceCapture {
         this.noAutofocus = options.getCameraNoAutofocus();
         this.focusDistance = options.getCameraFocusDistance();
         this.ois = options.getCameraOis();
+        this.controls = CameraControls.parse(options.getCameraControls());
+        if (controls != null && controls.logAll) {
+            TsDbg.logAllResults();
+        }
         this.crop = options.getCrop();
         this.captureOrientation = options.getCaptureOrientation();
         assert captureOrientation != null;
@@ -362,6 +367,13 @@ public class CameraCapture extends SurfaceCapture {
                             Ln.w("Camera characteristics unavailable; ignoring --camera-ois");
                         }
                     }
+                    if (controls != null) {
+                        if (characteristics != null) {
+                            configureControls(requestBuilder, characteristics);
+                        } else {
+                            Ln.w("Camera characteristics unavailable; ignoring --camera-controls");
+                        }
+                    }
 
                     CaptureRequest request = requestBuilder.build();
                     setRepeatingRequest(session, request);
@@ -504,6 +516,8 @@ public class CameraCapture extends SurfaceCapture {
                             + " sensorTs=" + (result.get(CaptureResult.SENSOR_TIMESTAMP) == null ? -1
                                     : result.get(CaptureResult.SENSOR_TIMESTAMP) / 1000)
                             + " exposureNs=" + result.get(CaptureResult.SENSOR_EXPOSURE_TIME)
+                            + " iso=" + result.get(CaptureResult.SENSOR_SENSITIVITY)
+                            + " aeMode=" + result.get(CaptureResult.CONTROL_AE_MODE)
                             + " frameDurationNs=" + result.get(CaptureResult.SENSOR_FRAME_DURATION)
                             + " frameNumber=" + result.getFrameNumber());
                 }
@@ -654,6 +668,77 @@ public class CameraCapture extends SurfaceCapture {
         }
         requestBuilder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, wanted);
         Ln.i("Camera optical stabilization " + ois);
+    }
+
+    private static boolean offers(int[] modes, int wanted) {
+        if (modes != null) {
+            for (int mode : modes) {
+                if (mode == wanted) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** NR, edge, manual exposure and tone curve as --camera-controls asks, where the camera offers them. */
+    private void configureControls(CaptureRequest.Builder requestBuilder, CameraCharacteristics characteristics) {
+        assertCameraThread();
+        if (controls.noiseReduction != null) {
+            int[] modes = characteristics.get(CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES);
+            if (offers(modes, controls.noiseReduction)) {
+                requestBuilder.set(CaptureRequest.NOISE_REDUCTION_MODE, controls.noiseReduction);
+                Ln.i("Camera noise reduction mode " + controls.noiseReduction);
+            } else {
+                Ln.w("Camera '" + cameraId + "' does not offer noise reduction mode " + controls.noiseReduction);
+            }
+        }
+        if (controls.edge != null) {
+            int[] modes = characteristics.get(CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES);
+            if (offers(modes, controls.edge)) {
+                requestBuilder.set(CaptureRequest.EDGE_MODE, controls.edge);
+                Ln.i("Camera edge mode " + controls.edge);
+            } else {
+                Ln.w("Camera '" + cameraId + "' does not offer edge mode " + controls.edge);
+            }
+        }
+        if (controls.manualExposure()) {
+            Range<Long> times = characteristics.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE);
+            Range<Integer> isos = characteristics.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE);
+            long ns = controls.exposureUs * 1000;
+            int iso = controls.iso;
+            if (times != null) {
+                ns = times.clamp(ns);
+            }
+            if (isos != null) {
+                iso = isos.clamp(iso);
+            }
+            requestBuilder.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF);
+            requestBuilder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, ns);
+            requestBuilder.set(CaptureRequest.SENSOR_SENSITIVITY, iso);
+            if (fps > 0) {
+                requestBuilder.set(CaptureRequest.SENSOR_FRAME_DURATION, 1_000_000_000L / fps);
+            }
+            Ln.i("Camera manual exposure " + ns + " ns, ISO " + iso);
+        }
+        if (controls.tonemapGamma > 0) {
+            int[] modes = characteristics.get(CameraCharacteristics.TONEMAP_AVAILABLE_TONE_MAP_MODES);
+            Integer maxPoints = characteristics.get(CameraCharacteristics.TONEMAP_MAX_CURVE_POINTS);
+            if (offers(modes, CameraMetadata.TONEMAP_MODE_CONTRAST_CURVE) && maxPoints != null && maxPoints >= 2) {
+                int n = Math.min(64, maxPoints);
+                float[] curve = new float[2 * n];
+                for (int i = 0; i < n; i++) {
+                    float in = (float) i / (n - 1);
+                    curve[2 * i] = in;
+                    curve[2 * i + 1] = (float) Math.pow(in, 1.0 / controls.tonemapGamma);
+                }
+                requestBuilder.set(CaptureRequest.TONEMAP_MODE, CameraMetadata.TONEMAP_MODE_CONTRAST_CURVE);
+                requestBuilder.set(CaptureRequest.TONEMAP_CURVE, new android.hardware.camera2.params.TonemapCurve(curve, curve, curve));
+                Ln.i("Camera tone curve gamma " + controls.tonemapGamma + " (" + n + " points)");
+            } else {
+                Ln.w("Camera '" + cameraId + "' does not offer a contrast curve; tonemap-gamma ignored");
+            }
+        }
     }
 
     private void assertCameraThread() {

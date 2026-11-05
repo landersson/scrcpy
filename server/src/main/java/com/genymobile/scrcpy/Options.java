@@ -52,6 +52,7 @@ public class Options {
     private boolean cameraNoAutofocus;
     private float cameraFocusDistance = Float.NaN;
     private String cameraOis; // "on" or "off"; null: the capture template's own
+    private String cameraControls; // --camera-controls list; null: the capture template's own
     private boolean showTouches;
     private boolean stayAwake;
     private int screenOffTimeout = -1;
@@ -208,6 +209,10 @@ public class Options {
 
     public String getCameraOis() {
         return cameraOis;
+    }
+
+    public String getCameraControls() {
+        return cameraControls;
     }
 
     public boolean getShowTouches() {
@@ -547,6 +552,9 @@ public class Options {
                         throw new IllegalArgumentException("Invalid camera_ois: " + value + " (on or off)");
                     }
                     options.cameraOis = value;
+                    break;
+                case "camera_controls":
+                    options.cameraControls = value;
                     break;
                 case "new_display":
                     options.newDisplay = parseNewDisplay(value);

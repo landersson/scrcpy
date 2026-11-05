@@ -382,6 +382,10 @@ execute_server(struct sc_server *server,
         VALIDATE_STRING(params->camera_ois);
         ADD_PARAM("camera_ois=%s", params->camera_ois);
     }
+    if (params->camera_controls) {
+        VALIDATE_STRING(params->camera_controls);
+        ADD_PARAM("camera_controls=%s", params->camera_controls);
+    }
     if (params->show_touches) {
         ADD_PARAM("show_touches=true");
     }

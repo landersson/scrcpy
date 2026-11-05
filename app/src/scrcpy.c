@@ -423,6 +423,7 @@ scrcpy(struct scrcpy_options *options) {
         .camera_zoom = options->camera_zoom,
         .camera_no_autofocus = options->camera_no_autofocus,
         .camera_ois = options->camera_ois,
+        .camera_controls = options->camera_controls,
         .vd_destroy_content = options->vd_destroy_content,
         .vd_system_decorations = options->vd_system_decorations,
         .keep_active = options->keep_active,

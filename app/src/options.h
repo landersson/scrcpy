@@ -332,6 +332,7 @@ struct scrcpy_options {
     bool camera_high_speed;
     bool camera_no_autofocus;
     const char *camera_ois; // "on" or "off"; NULL: the device's default
+    const char *camera_controls; // key=value,...; NULL: the template's own
 #define SC_OPTION_LIST_ENCODERS 0x1
 #define SC_OPTION_LIST_DISPLAYS 0x2
 #define SC_OPTION_LIST_CAMERAS 0x4

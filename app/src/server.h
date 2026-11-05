@@ -74,6 +74,7 @@ struct sc_server_params {
     bool camera_torch;
     bool camera_no_autofocus;
     const char *camera_ois;
+    const char *camera_controls;
     bool vd_destroy_content;
     bool vd_system_decorations;
     bool keep_active;

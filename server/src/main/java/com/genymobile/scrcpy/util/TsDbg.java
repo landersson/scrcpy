@@ -36,6 +36,9 @@ public final class TsDbg {
 
     private static final AtomicIntegerArray COUNTS = new AtomicIntegerArray(KINDS);
 
+    // --camera-controls log=all: every capture result, for measuring what the camera applied
+    private static volatile boolean allResults;
+
     private TsDbg() {
         // not instantiable
     }
@@ -45,7 +48,14 @@ public final class TsDbg {
      */
     public static int next(int kind) {
         int n = COUNTS.getAndIncrement(kind);
+        if (kind == CAMERA_RESULT && allResults) {
+            return n;
+        }
         return n < MAX_EVENTS ? n : -1;
+    }
+
+    public static void logAllResults() {
+        allResults = true;
     }
 
     public static void log(String what, String details) {

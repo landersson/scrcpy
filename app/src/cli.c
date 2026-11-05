@@ -87,6 +87,7 @@ enum {
     OPT_CAMERA_HIGH_SPEED,
     OPT_NO_CAMERA_AUTOFOCUS,
     OPT_CAMERA_OIS,
+    OPT_CAMERA_CONTROLS,
     OPT_DISPLAY_ORIENTATION,
     OPT_RECORD_ORIENTATION,
     OPT_ORIENTATION,
@@ -652,6 +653,18 @@ static const struct sc_option options[] = {
                 "By default the device decides (usually on where the lens has "
                 "it). Ignored, with a warning, if the lens does not offer the "
                 "requested mode.",
+    },
+    {
+        .longopt_id = OPT_CAMERA_CONTROLS,
+        .longopt = "camera-controls",
+        .argdesc = "list",
+        .text = "Camera processing controls, a comma-separated list of "
+                "key=value: nr=off|fast|hq|minimal|zsl (noise reduction), "
+                "edge=off|fast|hq|zsl (sharpening), exposure=<us> with "
+                "iso=<n> (manual exposure, AE off), tonemap-gamma=<g> "
+                "(contrast curve out = in^(1/g)), log=all (log every capture "
+                "result).\n"
+                "Unset keys leave the capture template's own values.",
     },
     {
         .longopt_id = OPT_NO_CLEANUP,
@@ -2938,6 +2951,9 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
                 }
                 opts->camera_ois = optarg;
                 break;
+            case OPT_CAMERA_CONTROLS:
+                opts->camera_controls = optarg;
+                break;
             case OPT_NO_WINDOW:
                 opts->window = false;
                 break;
@@ -3324,6 +3340,7 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
             || opts->camera_no_autofocus
             || opts->camera_focus_distance
             || opts->camera_ois
+            || opts->camera_controls
             || opts->camera_size) {
         LOGE("Camera options are only available with --video-source=camera");
         return false;
