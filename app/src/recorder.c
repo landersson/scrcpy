@@ -462,12 +462,8 @@ end:
 
 static bool
 sc_recorder_record(struct sc_recorder *recorder) {
-    bool ok = sc_recorder_open_output_file(recorder);
-    if (!ok) {
-        return false;
-    }
-
-    ok = sc_recorder_process_packets(recorder);
+    // the output file was opened by sc_recorder_start()
+    bool ok = sc_recorder_process_packets(recorder);
     sc_recorder_close_output_file(recorder);
     return ok;
 }
@@ -835,10 +831,18 @@ error_free_filename:
 
 bool
 sc_recorder_start(struct sc_recorder *recorder) {
+    // Open the output file before the thread starts: the packet sinks add
+    // their streams to its context, and they may be opened as soon as this
+    // returns (a live recording opens them on its next keyframe)
+    if (!sc_recorder_open_output_file(recorder)) {
+        return false;
+    }
+
     bool ok = sc_thread_create(&recorder->thread, run_recorder,
                                "scrcpy-recorder", recorder);
     if (!ok) {
         LOGE("Could not start recorder thread");
+        sc_recorder_close_output_file(recorder);
         return false;
     }
 

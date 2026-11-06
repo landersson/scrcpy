@@ -47,6 +47,7 @@ enum {
     OPT_VIDEO_BUFFER,
     OPT_V4L2_BUFFER,
     OPT_STDIN_CONTROL,
+    OPT_LIVE_RECORD,
     OPT_TUNNEL_HOST,
     OPT_TUNNEL_PORT,
     OPT_NO_CLIPBOARD_AUTOSYNC,
@@ -1021,8 +1022,27 @@ static const struct sc_option options[] = {
                 "'keyframes' decodes only the video's keyframes (the V4L2 "
                 "device then gets one frame per keyframe), 'full' decodes "
                 "every frame again from the next keyframe. The stream from "
-                "the device and the recording are not affected.\n"
+                "the device and the recording are not affected. With "
+                "--live-record, 'record <path>' and 'record-stop' too.\n"
                 "Requires --v4l2-sink.\n"
+                "This option is only available on Linux.",
+    },
+    {
+        .longopt_id = OPT_LIVE_RECORD,
+        .longopt = "live-record",
+        .text = "Record the running stream on command, without restarting "
+                "the camera or the encoder: the stdin command 'record <path>' "
+                "asks the device for a keyframe and records from it to <path> "
+                "(mp4, or mkv for a .mkv path); 'record-stop' finalizes the "
+                "file. A recording logs \"Live recording started: first "
+                "pts=<pts> <path>\" once it has its first frame and \"Live "
+                "recording stopped: <n> frames <path>\" once the file is "
+                "complete. Recordings may follow each other.\n"
+                "While only keyframes are decoded (the 'keyframes' command), "
+                "a keyframe is requested every 2 seconds, so the stream may "
+                "use a long keyframe interval.\n"
+                "Requires --stdin-control and control (no --no-control); not "
+                "with --record.\n"
                 "This option is only available on Linux.",
     },
     {
@@ -2849,6 +2869,15 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
                      "platform).");
                 return false;
 #endif
+            case OPT_LIVE_RECORD:
+#ifdef HAVE_V4L2
+                opts->live_record = true;
+                break;
+#else
+                LOGE("V4L2 (--live-record) is disabled (or unsupported on "
+                     "this platform).");
+                return false;
+#endif
             case OPT_STDIN_CONTROL:
 #ifdef HAVE_V4L2
                 opts->stdin_control = true;
@@ -3056,11 +3085,13 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
 
     bool otg = false;
     bool v4l2 = false;
+    bool live_record = false;
 #ifdef HAVE_USB
     otg = opts->otg;
 #endif
 #ifdef HAVE_V4L2
     v4l2 = !!opts->v4l2_device;
+    live_record = opts->live_record;
 #endif
 
     if (!opts->window) {
@@ -3086,7 +3117,9 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
         opts->video = false;
     }
 
-    if (opts->audio && !opts->audio_playback && !opts->record_filename) {
+    // a live recording records the audio too
+    if (opts->audio && !opts->audio_playback && !opts->record_filename
+            && !live_record) {
         LOGI("No audio playback, no recording: audio disabled");
         opts->audio = false;
     }
@@ -3141,6 +3174,22 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
     if (opts->stdin_control && !opts->v4l2_device) {
         LOGE("--stdin-control requires --v4l2-sink");
         return false;
+    }
+
+    if (opts->live_record) {
+        if (!opts->stdin_control) {
+            LOGE("--live-record requires --stdin-control");
+            return false;
+        }
+        if (!opts->control) {
+            LOGE("--live-record requires control (it requests keyframes): "
+                 "remove --no-control");
+            return false;
+        }
+        if (opts->record_filename) {
+            LOGE("--live-record and --record cannot be combined");
+            return false;
+        }
     }
 #endif
 

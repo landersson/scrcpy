@@ -49,6 +49,7 @@ public class ControlMessageReader {
             case ControlMessage.TYPE_RESET_VIDEO:
             case ControlMessage.TYPE_CAMERA_ZOOM_IN:
             case ControlMessage.TYPE_CAMERA_ZOOM_OUT:
+            case ControlMessage.TYPE_REQUEST_KEYFRAME:
                 return ControlMessage.createEmpty(type);
             case ControlMessage.TYPE_UHID_CREATE:
                 return parseUhidCreate();

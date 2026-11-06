@@ -103,7 +103,7 @@ add_project_arguments(feature_test_macros, language: 'c')
 
 v4l2_support = get_option('v4l2') and host_machine.system() == 'linux'
 if v4l2_support
-    src += [ 'src/decode_control.c', 'src/v4l2_sink.c' ]
+    src += [ 'src/decode_control.c', 'src/live_record.c', 'src/v4l2_sink.c' ]
 endif
 
 usb_support = get_option('usb')

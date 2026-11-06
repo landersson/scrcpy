@@ -446,6 +446,23 @@ static void test_serialize_reset_video(void) {
     assert(!memcmp(buf, expected, sizeof(expected)));
 }
 
+static void test_serialize_request_keyframe(void) {
+    struct sc_control_msg msg = {
+        .type = SC_CONTROL_MSG_TYPE_REQUEST_KEYFRAME,
+    };
+
+    uint8_t buf[SC_CONTROL_MSG_MAX_SIZE];
+    size_t size = sc_control_msg_serialize(&msg, buf);
+    assert(size == 1);
+
+    const uint8_t expected[] = {
+        SC_CONTROL_MSG_TYPE_REQUEST_KEYFRAME,
+    };
+    assert(!memcmp(buf, expected, sizeof(expected)));
+    // the server's ControlMessage.TYPE_REQUEST_KEYFRAME
+    assert(SC_CONTROL_MSG_TYPE_REQUEST_KEYFRAME == 23);
+}
+
 static void test_serialize_camera_set_torch(void) {
     struct sc_control_msg msg = {
         .type = SC_CONTROL_MSG_TYPE_CAMERA_SET_TORCH,
@@ -561,6 +578,7 @@ int main(int argc, char *argv[]) {
     test_serialize_open_hard_keyboard();
     test_serialize_start_app();
     test_serialize_reset_video();
+    test_serialize_request_keyframe();
     test_serialize_camera_set_torch();
     test_serialize_camera_zoom_in();
     test_serialize_camera_zoom_out();

@@ -202,6 +202,7 @@ sc_control_msg_serialize(const struct sc_control_msg *msg, uint8_t *buf) {
         case SC_CONTROL_MSG_TYPE_RESET_VIDEO:
         case SC_CONTROL_MSG_TYPE_CAMERA_ZOOM_IN:
         case SC_CONTROL_MSG_TYPE_CAMERA_ZOOM_OUT:
+        case SC_CONTROL_MSG_TYPE_REQUEST_KEYFRAME:
             // no additional data
             return 1;
         default:
@@ -348,6 +349,9 @@ sc_control_msg_log(const struct sc_control_msg *msg) {
             break;
         case SC_CONTROL_MSG_TYPE_SCAN_FILE:
             LOG_CMSG("scan file \"%s\"", msg->scan_file.path);
+            break;
+        case SC_CONTROL_MSG_TYPE_REQUEST_KEYFRAME:
+            LOG_CMSG("request keyframe");
             break;
         default:
             LOG_CMSG("unknown type: %u", (unsigned) msg->type);

@@ -158,6 +158,51 @@ static void test_stdin_control(void) {
     ok = scrcpy_parse_args(&args2, ARRAY_LEN(argv2), argv2);
     assert(!ok);
 }
+
+#define LIVE_RECORD_BASE \
+    "scrcpy", "--video-source=camera", "--no-video-playback", \
+    "--no-audio-playback", "--no-window", "--v4l2-sink", "/dev/video0"
+
+static bool
+parse_live_record(char **argv, int argc, struct scrcpy_cli_args *args) {
+    *args = (struct scrcpy_cli_args) {
+        .opts = scrcpy_options_default,
+        .help = false,
+        .version = false,
+    };
+    return scrcpy_parse_args(args, argc, argv);
+}
+
+static void test_live_record(void) {
+    struct scrcpy_cli_args args;
+
+    char *ok_argv[] = {LIVE_RECORD_BASE, "--stdin-control", "--live-record"};
+    assert(parse_live_record(ok_argv, ARRAY_LEN(ok_argv), &args));
+    assert(args.opts.live_record);
+    assert(args.opts.control);
+    // the recording records the audio, with no playback and no --record
+    assert(args.opts.audio);
+
+    // the commands come from stdin
+    char *no_stdin[] = {LIVE_RECORD_BASE, "--live-record"};
+    assert(!parse_live_record(no_stdin, ARRAY_LEN(no_stdin), &args));
+
+    // the keyframe requests need control
+    char *no_control[] = {LIVE_RECORD_BASE, "--stdin-control", "--live-record",
+                          "--no-control"};
+    assert(!parse_live_record(no_control, ARRAY_LEN(no_control), &args));
+
+    // one recorder per stream
+    char *with_record[] = {LIVE_RECORD_BASE, "--stdin-control", "--live-record",
+                           "--record", "file.mp4"};
+    assert(!parse_live_record(with_record, ARRAY_LEN(with_record), &args));
+
+    // without --live-record the audio still goes as before
+    char *plain[] = {LIVE_RECORD_BASE, "--stdin-control"};
+    assert(parse_live_record(plain, ARRAY_LEN(plain), &args));
+    assert(!args.opts.live_record);
+    assert(!args.opts.audio);
+}
 #endif
 
 static void test_parse_shortcut_mods(void) {
@@ -198,6 +243,7 @@ int main(int argc, char *argv[]) {
     test_options2();
 #ifdef HAVE_V4L2
     test_stdin_control();
+    test_live_record();
 #endif
     test_parse_shortcut_mods();
     return 0;

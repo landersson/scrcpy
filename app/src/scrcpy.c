@@ -45,6 +45,7 @@
 #include "util/tick.h"
 #ifdef HAVE_V4L2
 # include "decode_control.h"
+# include "live_record.h"
 # include "v4l2_sink.h"
 #endif
 #include "video_regulator.h"
@@ -63,6 +64,7 @@ struct scrcpy {
     struct sc_v4l2_sink v4l2_sink;
     struct sc_video_regulator v4l2_regulator;
     struct sc_decode_control decode_control;
+    struct sc_live_record live_record;
 #endif
     struct sc_controller controller;
     struct sc_file_pusher file_pusher;
@@ -360,6 +362,7 @@ scrcpy(struct scrcpy_options *options) {
     bool timeout_started = false;
 #ifdef HAVE_V4L2
     bool decode_control_started = false;
+    bool live_record_initialized = false;
 #endif
     bool disconnected = false;
 
@@ -597,6 +600,27 @@ scrcpy(struct scrcpy_options *options) {
         }
     }
 
+#ifdef HAVE_V4L2
+    if (options->live_record) {
+        // the CLI requires the video stream (for the V4L2 sink) and control
+        sc_tick dormant_interval =
+            SC_TICK_FROM_MS(SC_LIVE_RECORD_DORMANT_KEYFRAME_MS);
+        if (!sc_live_record_init(&s->live_record, options->video,
+                                 options->audio, options->record_orientation,
+                                 dormant_interval)) {
+            goto end;
+        }
+        live_record_initialized = true;
+
+        sc_packet_source_add_sink(&s->video_demuxer.packet_source,
+                                  &s->live_record.video_packet_sink);
+        if (options->audio) {
+            sc_packet_source_add_sink(&s->audio_demuxer.packet_source,
+                                      &s->live_record.audio_packet_sink);
+        }
+    }
+#endif
+
     struct sc_controller *controller = NULL;
     struct sc_key_processor *kp = NULL;
     struct sc_mouse_processor *mp = NULL;
@@ -763,6 +787,15 @@ aoa_complete:
     // There is a controller if and only if control is enabled
     assert(options->control == !!controller);
 
+#ifdef HAVE_V4L2
+    if (live_record_initialized) {
+        sc_live_record_set_controller(&s->live_record, controller);
+        if (!sc_live_record_start_requester(&s->live_record)) {
+            goto end;
+        }
+    }
+#endif
+
     if (options->window) {
         struct sc_screen_params screen_params = {
             .video = options->video_playback,
@@ -839,6 +872,8 @@ aoa_complete:
         // --stdin-control requires --v4l2-sink (cli.c); the decoder reads the
         // control once the demuxers start, below
         if (options->stdin_control) {
+            s->decode_control.live_record =
+                live_record_initialized ? &s->live_record : NULL;
             s->video_decoder.control = &s->decode_control;
             if (!sc_decode_control_start(&s->decode_control)) {
                 goto end;
@@ -938,6 +973,10 @@ end:
     if (decode_control_started) {
         sc_decode_control_stop(&s->decode_control);
     }
+    if (live_record_initialized) {
+        // finalizes a running recording (its file gets its trailer)
+        sc_live_record_stop(&s->live_record);
+    }
 #endif
 
     // The demuxer is not stopped explicitly, because it will stop by itself on
@@ -981,6 +1020,10 @@ end:
     if (decode_control_started) {
         sc_decode_control_join(&s->decode_control);
     }
+    if (live_record_initialized) {
+        // its keyframe requester uses the controller, joined below
+        sc_live_record_join(&s->live_record);
+    }
 #endif
     if (timeout_started) {
         sc_timeout_join(&s->timeout);
@@ -1002,6 +1045,10 @@ end:
 #ifdef HAVE_V4L2
     if (v4l2_sink_initialized) {
         sc_v4l2_sink_destroy(&s->v4l2_sink);
+    }
+    if (live_record_initialized) {
+        // the demuxers, which call its sinks, are joined
+        sc_live_record_destroy(&s->live_record);
     }
 #endif
 

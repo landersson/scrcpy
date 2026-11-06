@@ -295,6 +295,7 @@ struct scrcpy_options {
     const char *v4l2_device;
     sc_tick v4l2_buffer;
     bool stdin_control;
+    bool live_record;
 #endif
 #ifdef HAVE_USB
     bool otg;

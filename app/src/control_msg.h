@@ -50,6 +50,8 @@ enum sc_control_msg_type {
     SC_CONTROL_MSG_TYPE_CAMERA_ZOOM_OUT,
     SC_CONTROL_MSG_TYPE_RESIZE_DISPLAY,
     SC_CONTROL_MSG_TYPE_SCAN_FILE,
+    // a keyframe as soon as possible from the running encoder (live recording)
+    SC_CONTROL_MSG_TYPE_REQUEST_KEYFRAME,
 };
 
 enum sc_copy_key {

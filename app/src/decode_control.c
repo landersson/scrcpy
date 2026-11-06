@@ -4,19 +4,43 @@
 #include <poll.h>
 #include <unistd.h>
 
+#include "live_record.h"
 #include "util/log.h"
 
-#define SC_DECODE_CONTROL_LINE_MAX 256
+// long enough for a recording path
+#define SC_DECODE_CONTROL_LINE_MAX 4096
 #define SC_DECODE_CONTROL_POLL_MS 200
 
 static void
 handle_line(struct sc_decode_control *dc, const char *line, size_t len) {
-    switch (sc_decode_control_parse(line, len)) {
+    const char *arg;
+    size_t arg_len;
+    enum sc_decode_command cmd =
+        sc_decode_control_parse(line, len, &arg, &arg_len);
+    bool record_cmd = cmd == SC_DECODE_COMMAND_RECORD
+                   || cmd == SC_DECODE_COMMAND_RECORD_STOP;
+    if (record_cmd && !dc->live_record) {
+        LOGW("Decode control: '%.*s' needs --live-record", (int) len, line);
+        return;
+    }
+    switch (cmd) {
         case SC_DECODE_COMMAND_KEYFRAMES:
             atomic_store(&dc->want_keyframes, true);
+            if (dc->live_record) {
+                sc_live_record_set_dormant(dc->live_record, true);
+            }
             break;
         case SC_DECODE_COMMAND_FULL:
             atomic_store(&dc->want_keyframes, false);
+            if (dc->live_record) {
+                sc_live_record_set_dormant(dc->live_record, false);
+            }
+            break;
+        case SC_DECODE_COMMAND_RECORD:
+            sc_live_record_record(dc->live_record, arg, arg_len);
+            break;
+        case SC_DECODE_COMMAND_RECORD_STOP:
+            sc_live_record_stop_recording(dc->live_record);
             break;
         default:
             LOGW("Decode control: unknown command '%.*s'", (int) len, line);
@@ -28,7 +52,8 @@ run_decode_control(void *data) {
     struct sc_decode_control *dc = data;
 
     char line[SC_DECODE_CONTROL_LINE_MAX];
-    size_t len = 0; // an overlong line is cut, and then logged as unknown
+    size_t len = 0;
+    bool overlong = false; // an overlong line is ignored (it may be a path)
 
     while (!atomic_load(&dc->stopped)) {
         struct pollfd pfd = {.fd = STDIN_FILENO, .events = POLLIN};
@@ -61,10 +86,18 @@ run_decode_control(void *data) {
 
         for (ssize_t i = 0; i < n; ++i) {
             if (buf[i] == '\n') {
-                handle_line(dc, line, len);
+                if (overlong) {
+                    LOGW("Decode control: ignoring a line longer than %d "
+                         "bytes", SC_DECODE_CONTROL_LINE_MAX);
+                } else {
+                    handle_line(dc, line, len);
+                }
                 len = 0;
+                overlong = false;
             } else if (len < sizeof(line)) {
                 line[len++] = buf[i];
+            } else {
+                overlong = true;
             }
         }
     }
@@ -74,6 +107,7 @@ run_decode_control(void *data) {
 
 bool
 sc_decode_control_start(struct sc_decode_control *dc) {
+    // dc->live_record is set by the caller
     atomic_init(&dc->want_keyframes, false);
     atomic_init(&dc->stopped, false);
     bool ok = sc_thread_create(&dc->thread, run_decode_control, "scrcpy-stdin",
