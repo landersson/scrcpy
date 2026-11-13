@@ -45,6 +45,41 @@ static void test_parse_record(void) {
     expect_record("record /data/my turn/a.mkv", "/data/my turn/a.mkv");
 }
 
+static void test_parse_focus(void) {
+    const char *arg = NULL;
+    size_t arg_len = 0;
+    const char *line = "focus 1.725 42 \r";
+    assert(sc_decode_control_parse(line, strlen(line), &arg, &arg_len)
+           == SC_DECODE_COMMAND_FOCUS);
+    float d = 0;
+    uint32_t id = 0;
+    assert(sc_decode_control_parse_focus(arg, arg_len, &d, &id));
+    assert(d > 1.7249f && d < 1.7251f);
+    assert(id == 42);
+    // a bare "focus" is no command
+    assert(sc_decode_control_parse("focus", 5, NULL, NULL)
+           == SC_DECODE_COMMAND_NONE);
+
+    const char *bad[] = {
+        "1.5",          // no id
+        "1.5 x",        // id not a number
+        "1.5 -3",       // negative id
+        "1.5 3 4",      // extra field
+        "-0.5 3",       // negative distance
+        "nan 3",        // not a number
+        "abc 3",
+        "1.5x 3",       // junk after the number
+        "1.5 4294967296", // id over 32 bits
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
+        assert(!sc_decode_control_parse_focus(bad[i], strlen(bad[i]), &d, &id));
+    }
+    assert(sc_decode_control_parse_focus("0 0", 3, &d, &id));
+    assert(d == 0 && id == 0);
+    assert(sc_decode_control_parse_focus("2 4294967295", 12, &d, &id));
+    assert(id == UINT32_MAX);
+}
+
 static void test_mode_next(void) {
     // keyframes only as soon as it is wanted, on any packet
     assert(sc_decode_mode_next(false, true, false));
@@ -65,6 +100,7 @@ int main(int argc, char *argv[]) {
 
     test_parse();
     test_parse_record();
+    test_parse_focus();
     test_mode_next();
     return 0;
 }

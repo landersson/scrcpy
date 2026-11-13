@@ -52,6 +52,9 @@ enum sc_control_msg_type {
     SC_CONTROL_MSG_TYPE_SCAN_FILE,
     // a keyframe as soon as possible from the running encoder (live recording)
     SC_CONTROL_MSG_TYPE_REQUEST_KEYFRAME,
+    // move the running camera's lens to a fixed focus distance (focus tuning on the live
+    // stream); the device logs "Focus settled: id=<id> ..." once the lens has stopped there
+    SC_CONTROL_MSG_TYPE_CAMERA_SET_FOCUS,
 };
 
 enum sc_copy_key {
@@ -123,6 +126,10 @@ struct sc_control_msg {
         struct {
             bool on;
         } camera_set_torch;
+        struct {
+            uint32_t id; // echoed in the device's "Focus settled" line
+            float diopters;
+        } camera_set_focus;
         struct {
             uint16_t width;
             uint16_t height;

@@ -1023,7 +1023,12 @@ static const struct sc_option options[] = {
                 "device then gets one frame per keyframe), 'full' decodes "
                 "every frame again from the next keyframe. The stream from "
                 "the device and the recording are not affected. With "
-                "--live-record, 'record <path>' and 'record-stop' too.\n"
+                "--live-record, 'record <path>' and 'record-stop' too. With "
+                "control and a camera source, 'focus <diopters> <id>' moves "
+                "the running camera's lens to that fixed focus distance "
+                "(autofocus off); the device logs \"Focus settled: id=<id> "
+                "diopters=<reported> frames=<n>\" once the lens has stopped "
+                "there, or \"Focus refused: id=<id> <reason>\".\n"
                 "Requires --v4l2-sink.\n"
                 "This option is only available on Linux.",
     },

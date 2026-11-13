@@ -4,6 +4,8 @@
 #include <poll.h>
 #include <unistd.h>
 
+#include "control_msg.h"
+#include "controller.h"
 #include "live_record.h"
 #include "util/log.h"
 
@@ -42,6 +44,22 @@ handle_line(struct sc_decode_control *dc, const char *line, size_t len) {
         case SC_DECODE_COMMAND_RECORD_STOP:
             sc_live_record_stop_recording(dc->live_record);
             break;
+        case SC_DECODE_COMMAND_FOCUS: {
+            struct sc_control_msg msg = {
+                .type = SC_CONTROL_MSG_TYPE_CAMERA_SET_FOCUS,
+            };
+            if (!dc->controller) {
+                LOGW("Decode control: 'focus' needs control (no --no-control)");
+            } else if (!sc_decode_control_parse_focus(
+                    arg, arg_len, &msg.camera_set_focus.diopters,
+                    &msg.camera_set_focus.id)) {
+                LOGW("Decode control: bad focus command '%.*s' (want 'focus "
+                     "<diopters> <id>')", (int) len, line);
+            } else if (!sc_controller_push_msg(dc->controller, &msg)) {
+                LOGW("Decode control: could not send the focus request");
+            }
+            break;
+        }
         default:
             LOGW("Decode control: unknown command '%.*s'", (int) len, line);
     }

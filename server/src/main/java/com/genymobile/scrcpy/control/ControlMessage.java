@@ -31,6 +31,7 @@ public final class ControlMessage {
     public static final int TYPE_RESIZE_DISPLAY = 21;
     public static final int TYPE_SCAN_FILE = 22;
     public static final int TYPE_REQUEST_KEYFRAME = 23;
+    public static final int TYPE_CAMERA_SET_FOCUS = 24;
 
     public static final long SEQUENCE_INVALID = 0;
 
@@ -57,6 +58,7 @@ public final class ControlMessage {
     private int id;
     private byte[] data;
     private boolean on;
+    private float focusDistance; // diopters (TYPE_CAMERA_SET_FOCUS)
     private int vendorId;
     private int productId;
     private int width;
@@ -174,6 +176,14 @@ public final class ControlMessage {
         return msg;
     }
 
+    public static ControlMessage createCameraSetFocus(int id, float focusDistance) {
+        ControlMessage msg = new ControlMessage();
+        msg.type = TYPE_CAMERA_SET_FOCUS;
+        msg.id = id;
+        msg.focusDistance = focusDistance;
+        return msg;
+    }
+
     public static ControlMessage createCameraSetTorch(boolean on) {
         ControlMessage msg = new ControlMessage();
         msg.type = TYPE_CAMERA_SET_TORCH;
@@ -270,6 +280,10 @@ public final class ControlMessage {
 
     public boolean getOn() {
         return on;
+    }
+
+    public float getFocusDistance() {
+        return focusDistance;
     }
 
     public int getVendorId() {

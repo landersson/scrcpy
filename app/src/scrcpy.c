@@ -874,6 +874,7 @@ aoa_complete:
         if (options->stdin_control) {
             s->decode_control.live_record =
                 live_record_initialized ? &s->live_record : NULL;
+            s->decode_control.controller = controller;
             s->video_decoder.control = &s->decode_control;
             if (!sc_decode_control_start(&s->decode_control)) {
                 goto end;

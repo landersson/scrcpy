@@ -66,8 +66,10 @@ public class CameraCapture extends SurfaceCapture {
     private final CameraAspectRatio aspectRatio;
     private final int fps;
     private final boolean highSpeed;
-    private final boolean noAutofocus;
-    private final float focusDistance;
+    // the launch options, then what a live focus request set (setFocusDistance): a capture
+    // restarted in this process keeps the focus it had (camera thread after construction)
+    private boolean noAutofocus;
+    private float focusDistance;
     private final String ois;
     private final CameraControls controls;
     private final Rect crop;
@@ -97,6 +99,16 @@ public class CameraCapture extends SurfaceCapture {
     private boolean started;
     private CaptureRequest.Builder requestBuilder;
     private CameraCaptureSession currentSession;
+    private CameraCharacteristics currentCharacteristics; // the open camera's (camera thread)
+
+    // A focus move on the running camera (setFocusDistance) waits here, on the camera thread,
+    // for a result that shows the lens stopped at it: then "Focus settled: id=..." is logged.
+    private static final int FOCUS_SETTLED_MIN_FRAMES = 2; // frames carrying the new distance
+    private static final int FOCUS_SETTLED_FRAMES_WITHOUT_STATE = 4; // a HAL without LENS_STATE
+    private boolean focusPending;
+    private int focusPendingId;
+    private float focusPendingDiopters;
+    private int focusPendingFrames;
 
     public CameraCapture(Options options) {
         this.explicitCameraId = options.getCameraId();
@@ -321,6 +333,7 @@ public class CameraCapture extends SurfaceCapture {
                 CameraCharacteristics characteristics = null;
                 try {
                     characteristics = cameraManager.getCameraCharacteristics(cameraId);
+                    currentCharacteristics = characteristics;
                     zoomRange = characteristics.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE);
                     TsDbg.log("camera-configured", "id=" + cameraId + " timestampSource="
                             + characteristics.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE)
@@ -504,6 +517,9 @@ public class CameraCapture extends SurfaceCapture {
 
             @Override
             public void onCaptureCompleted(CameraCaptureSession session, CaptureRequest request, TotalCaptureResult result) {
+                if (focusPending) {
+                    checkFocusSettled(request, result);
+                }
                 int dbg = TsDbg.next(TsDbg.CAMERA_RESULT);
                 if (dbg >= 0) {
                     TsDbg.log("camera-result", "n=" + dbg
@@ -541,6 +557,65 @@ public class CameraCapture extends SurfaceCapture {
     @Override
     public boolean isClosed() {
         return disconnected.get();
+    }
+
+    /**
+     * Move the running camera's lens to a fixed focus distance (autofocus off), without
+     * restarting the capture: focus tuning on the live stream. Once a result shows the lens
+     * stopped there (LENS_STATE stationary, on at least FOCUS_SETTLED_MIN_FRAMES frames that
+     * carry the new distance), "Focus settled: id=<id> diopters=<reported> ..." is logged, or
+     * "Focus refused: id=<id> <reason>" at once; a newer request replaces a pending one (only
+     * the newest is reported). The focus stays the capture's if it restarts.
+     */
+    public void setFocusDistance(int id, float diopters) {
+        cameraHandler.post(() -> {
+            assertCameraThread();
+            long uid = Integer.toUnsignedLong(id);
+            if (currentSession == null || requestBuilder == null || currentCharacteristics == null) {
+                Ln.w("Focus refused: id=" + uid + " no running camera session");
+                return;
+            }
+            noAutofocus = true;
+            focusDistance = diopters;
+            Float applied = configureManualFocus(requestBuilder, currentCharacteristics);
+            if (applied == null) {
+                Ln.w("Focus refused: id=" + uid + " camera '" + cameraId + "' cannot focus at a fixed distance");
+                return;
+            }
+            try {
+                focusPending = true;
+                focusPendingId = id;
+                focusPendingDiopters = applied;
+                focusPendingFrames = 0;
+                setRepeatingRequest(currentSession, requestBuilder.build());
+            } catch (CameraAccessException e) {
+                focusPending = false;
+                Ln.e("Camera error", e);
+            }
+        });
+    }
+
+    private void checkFocusSettled(CaptureRequest request, TotalCaptureResult result) {
+        Float requested = request.get(CaptureRequest.LENS_FOCUS_DISTANCE);
+        if (requested == null || Float.compare(requested, focusPendingDiopters) != 0) {
+            return; // a frame of an earlier request, still in the pipeline
+        }
+        ++focusPendingFrames;
+        Integer lensState = result.get(CaptureResult.LENS_STATE);
+        boolean stopped = lensState == null
+                ? focusPendingFrames >= FOCUS_SETTLED_FRAMES_WITHOUT_STATE
+                : lensState == CameraMetadata.LENS_STATE_STATIONARY && focusPendingFrames >= FOCUS_SETTLED_MIN_FRAMES;
+        if (!stopped) {
+            return;
+        }
+        focusPending = false;
+        Long ts = result.get(CaptureResult.SENSOR_TIMESTAMP);
+        Ln.i("Focus settled: id=" + Integer.toUnsignedLong(focusPendingId)
+                + " diopters=" + result.get(CaptureResult.LENS_FOCUS_DISTANCE)
+                + " frames=" + focusPendingFrames
+                + " lensState=" + lensState
+                + " sensorTs=" + (ts == null ? -1 : ts / 1000)
+                + " frameNumber=" + result.getFrameNumber());
     }
 
     public void setTorchEnabled(boolean enabled) {
@@ -599,52 +674,48 @@ public class CameraCapture extends SurfaceCapture {
         return zoomRange.clamp(value);
     }
 
-    private void configureManualFocus(CaptureRequest.Builder requestBuilder, CameraCharacteristics characteristics) {
+    /**
+     * Autofocus off and, with a focus distance, the lens at it (clamped to what the lens can do),
+     * as --no-camera-autofocus/--camera-focus-distance or a live focus request ask. Returns the
+     * distance set, or null when none was (why is logged).
+     */
+    private Float configureManualFocus(CaptureRequest.Builder requestBuilder, CameraCharacteristics characteristics) {
         assertCameraThread();
         if (highSpeed) {
             // Constrained high-speed sessions only accept a restricted set of capture keys
             Ln.w("Manual focus is not supported in high-speed capture mode; ignoring");
-            return;
+            return null;
         }
 
-        int[] afModes = characteristics.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES);
-        boolean afOffSupported = false;
-        if (afModes != null) {
-            for (int mode : afModes) {
-                if (mode == CameraMetadata.CONTROL_AF_MODE_OFF) {
-                    afOffSupported = true;
-                    break;
-                }
-            }
-        }
-
-        if (!afOffSupported) {
+        if (!offers(characteristics.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES), CameraMetadata.CONTROL_AF_MODE_OFF)) {
             Ln.w("Camera '" + cameraId + "' does not support disabling autofocus; ignoring "
                     + "--no-camera-autofocus/--camera-focus-distance");
-            return;
+            return null;
         }
 
         requestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF);
         Ln.i("Camera autofocus disabled");
 
-        if (!Float.isNaN(focusDistance)) {
-            Float minFocusDistance = characteristics.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE);
-            if (minFocusDistance == null || minFocusDistance == 0) {
-                // 0 (or unavailable) means the lens is fixed-focus: LENS_FOCUS_DISTANCE cannot be set
-                Ln.w("Camera '" + cameraId + "' has a fixed-focus lens; --camera-focus-distance ignored");
-            } else {
-                float clamped = focusDistance;
-                if (clamped < 0) {
-                    clamped = 0;
-                } else if (clamped > minFocusDistance) {
-                    Ln.w("Requested focus distance " + focusDistance + " exceeds the closest focus distance "
-                            + minFocusDistance + "; clamping");
-                    clamped = minFocusDistance;
-                }
-                requestBuilder.set(CaptureRequest.LENS_FOCUS_DISTANCE, clamped);
-                Ln.i("Camera focus distance set to " + clamped + " diopters");
-            }
+        if (Float.isNaN(focusDistance)) {
+            return null;
         }
+        Float minFocusDistance = characteristics.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE);
+        if (minFocusDistance == null || minFocusDistance == 0) {
+            // 0 (or unavailable) means the lens is fixed-focus: LENS_FOCUS_DISTANCE cannot be set
+            Ln.w("Camera '" + cameraId + "' has a fixed-focus lens; --camera-focus-distance ignored");
+            return null;
+        }
+        float clamped = focusDistance;
+        if (clamped < 0) {
+            clamped = 0;
+        } else if (clamped > minFocusDistance) {
+            Ln.w("Requested focus distance " + focusDistance + " exceeds the closest focus distance "
+                    + minFocusDistance + "; clamping");
+            clamped = minFocusDistance;
+        }
+        requestBuilder.set(CaptureRequest.LENS_FOCUS_DISTANCE, clamped);
+        Ln.i("Camera focus distance set to " + clamped + " diopters");
+        return clamped;
     }
 
     /** LENS_OPTICAL_STABILIZATION_MODE on or off, as --camera-ois asks, if the lens offers that mode. */

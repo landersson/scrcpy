@@ -419,6 +419,9 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
                 case ControlMessage.TYPE_SCAN_FILE:
                     scanFile(msg.getText());
                     return true;
+                case ControlMessage.TYPE_CAMERA_SET_FOCUS:
+                    Ln.w("Focus refused: id=" + Integer.toUnsignedLong(msg.getId()) + " the video source is not a camera");
+                    return true;
                 default:
                     // fall through
             }
@@ -428,6 +431,9 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
             switch (type) {
                 case ControlMessage.TYPE_CAMERA_SET_TORCH:
                     cameraCapture.setTorchEnabled(msg.getOn());
+                    return true;
+                case ControlMessage.TYPE_CAMERA_SET_FOCUS:
+                    cameraCapture.setFocusDistance(msg.getId(), msg.getFocusDistance());
                     return true;
                 case ControlMessage.TYPE_CAMERA_ZOOM_IN:
                     cameraCapture.zoomIn();

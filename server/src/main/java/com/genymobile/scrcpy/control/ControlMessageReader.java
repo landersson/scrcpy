@@ -61,6 +61,8 @@ public class ControlMessageReader {
                 return parseStartApp();
             case ControlMessage.TYPE_CAMERA_SET_TORCH:
                 return parseCameraSetTorch();
+            case ControlMessage.TYPE_CAMERA_SET_FOCUS:
+                return parseCameraSetFocus();
             case ControlMessage.TYPE_RESIZE_DISPLAY:
                 return parseResizeDisplay();
             case ControlMessage.TYPE_SCAN_FILE:
@@ -178,6 +180,12 @@ public class ControlMessageReader {
     private ControlMessage parseCameraSetTorch() throws IOException {
         boolean on = dis.readBoolean();
         return ControlMessage.createCameraSetTorch(on);
+    }
+
+    private ControlMessage parseCameraSetFocus() throws IOException {
+        int id = dis.readInt(); // unsigned on the client side
+        float focusDistance = Float.intBitsToFloat(dis.readInt());
+        return ControlMessage.createCameraSetFocus(id, focusDistance);
     }
 
     private ControlMessage parseResizeDisplay() throws IOException {

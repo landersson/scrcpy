@@ -185,6 +185,14 @@ sc_control_msg_serialize(const struct sc_control_msg *msg, uint8_t *buf) {
         case SC_CONTROL_MSG_TYPE_CAMERA_SET_TORCH:
             buf[1] = msg->camera_set_torch.on ? 1 : 0;
             return 2;
+        case SC_CONTROL_MSG_TYPE_CAMERA_SET_FOCUS: {
+            sc_write32be(&buf[1], msg->camera_set_focus.id);
+            uint32_t bits; // the IEEE 754 float, big-endian (Java: Float.intBitsToFloat)
+            static_assert(sizeof(bits) == sizeof(float), "float must be 32 bits");
+            memcpy(&bits, &msg->camera_set_focus.diopters, sizeof(bits));
+            sc_write32be(&buf[5], bits);
+            return 9;
+        }
         case SC_CONTROL_MSG_TYPE_RESIZE_DISPLAY:
             sc_write16be(&buf[1], msg->resize_display.width);
             sc_write16be(&buf[3], msg->resize_display.height);
@@ -340,6 +348,10 @@ sc_control_msg_log(const struct sc_control_msg *msg) {
         case SC_CONTROL_MSG_TYPE_CAMERA_SET_TORCH:
             LOG_CMSG("camera set torch %s",
                      msg->camera_set_torch.on ? "on" : "off");
+            break;
+        case SC_CONTROL_MSG_TYPE_CAMERA_SET_FOCUS:
+            LOG_CMSG("camera set focus %f diopters (id=%" PRIu32 ")",
+                     msg->camera_set_focus.diopters, msg->camera_set_focus.id);
             break;
         case SC_CONTROL_MSG_TYPE_CAMERA_ZOOM_IN:
             LOG_CMSG("camera zoom in");

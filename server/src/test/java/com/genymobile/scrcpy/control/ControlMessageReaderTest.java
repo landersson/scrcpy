@@ -441,6 +441,26 @@ public class ControlMessageReaderTest {
     }
 
     @Test
+    public void testParseCameraSetFocus() throws IOException {
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        DataOutputStream dos = new DataOutputStream(bos);
+        dos.writeByte(ControlMessage.TYPE_CAMERA_SET_FOCUS);
+        dos.writeInt(0xFFFFFFFE); // ids are unsigned on the client side
+        dos.writeInt(Float.floatToIntBits(1.725f));
+        byte[] packet = bos.toByteArray();
+
+        ByteArrayInputStream bis = new ByteArrayInputStream(packet);
+        ControlMessageReader reader = new ControlMessageReader(bis);
+
+        ControlMessage event = reader.read();
+        Assert.assertEquals(ControlMessage.TYPE_CAMERA_SET_FOCUS, event.getType());
+        Assert.assertEquals(0xFFFFFFFEL, Integer.toUnsignedLong(event.getId()));
+        Assert.assertEquals(1.725f, event.getFocusDistance(), 0f);
+
+        Assert.assertEquals(-1, bis.read()); // EOS
+    }
+
+    @Test
     public void testParseRequestKeyFrame() throws IOException {
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
         DataOutputStream dos = new DataOutputStream(bos);
