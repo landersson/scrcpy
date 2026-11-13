@@ -43,7 +43,11 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
@@ -56,7 +60,8 @@ import java.util.function.Predicate;
 
 /**
  * One opened camera for still shots. A small YUV stream keeps 3A running with the requested focus (and, once locked, holds the AE/AWB
- * lock); each shot is a single STILL_CAPTURE request to a JPEG stream at the largest size, written to a file on the phone.
+ * lock); each shot is a single STILL_CAPTURE request to a JPEG stream at the largest size, written to a file on the phone. A burst
+ * queues its STILL_CAPTURE requests at once, so the camera shoots them back to back.
  * <p>
  * Commands run on the caller's thread and block; camera callbacks run on the session's own handler thread.
  */
@@ -73,6 +78,10 @@ final class StillSession implements AutoCloseable {
     private static final int LOCK_TIMEOUT_MS = 1500;
     private static final int LOCKED_FRAMES = 2;
     private static final int SHOT_TIMEOUT_MS = 10000;
+    private static final int BURST_FRAME_TIMEOUT_MS = 1000; // more per frame of a burst
+    static final int MAX_BURST = 64;
+    // JPEG buffers: a burst's arrive one a frame and are written in a few ms each, so a few in flight keep the camera going
+    private static final int JPEG_BUFFERS = 4;
     private static final long MANUAL_FRAME_DURATION_NS = 33_333_333L; // at least; longer for a longer manual exposure
 
     static final class Options {
@@ -280,20 +289,9 @@ final class StillSession implements AutoCloseable {
         try {
             checkDevice();
             drainImages();
-            CaptureRequest.Builder builder = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
-            builder.addTarget(jpegReader.getSurface());
-            if (shotOptions.raw) {
-                builder.addTarget(rawReader.getSurface());
-            }
-            apply3A(builder, options.lock);
-            applyProcessing(builder, shotOptions);
-            builder.set(CaptureRequest.JPEG_QUALITY, (byte) 100);
-            builder.set(CaptureRequest.JPEG_ORIENTATION, 0);
-            builder.set(CaptureRequest.JPEG_THUMBNAIL_SIZE, new Size(0, 0));
-
             CompletableFuture<TotalCaptureResult> done = new CompletableFuture<>();
             long start = SystemClock.elapsedRealtime();
-            session.capture(builder.build(), new CameraCaptureSession.CaptureCallback() {
+            session.capture(stillRequest(shotOptions), new CameraCaptureSession.CaptureCallback() {
                 @Override
                 public void onCaptureCompleted(CameraCaptureSession s, CaptureRequest request, TotalCaptureResult result) {
                     done.complete(result);
@@ -314,7 +312,7 @@ final class StillSession implements AutoCloseable {
             long captureMs = SystemClock.elapsedRealtime() - start;
 
             Long timestamp = result.get(CaptureResult.SENSOR_TIMESTAMP);
-            Image image = takeImage(images, timestamp, start + SHOT_TIMEOUT_MS, "JPEG");
+            Image image = takeImage(images, null, timestamp, start + SHOT_TIMEOUT_MS, "JPEG");
             long writeStart = SystemClock.elapsedRealtime();
             File file = new File(options.dir, name + ".jpg");
             int bytes;
@@ -330,7 +328,7 @@ final class StillSession implements AutoCloseable {
             File rawFile = null;
             long rawBytes = 0;
             if (shotOptions.raw) {
-                Image raw = takeImage(rawImages, timestamp, start + SHOT_TIMEOUT_MS, "RAW");
+                Image raw = takeImage(rawImages, null, timestamp, start + SHOT_TIMEOUT_MS, "RAW");
                 rawFile = new File(options.dir, name + ".dng");
                 try {
                     rawBytes = writeDng(raw, result, rawFile);
@@ -357,6 +355,110 @@ final class StillSession implements AutoCloseable {
         } catch (Exception e) {
             throw wrap(e, "still " + name);
         }
+    }
+
+    /**
+     * Take `count` stills in one burst into dir/stem-fNN.jpg (NN from 00): the requests are queued at once, so the camera shoots them
+     * back to back at its frame rate instead of one capture round trip each, and each JPEG is written as it arrives. Returns the "burst"
+     * event (without id): each frame as a shot reports it, plus when its result came ("result_ms", from the request).
+     */
+    JSONObject burst(String stem, int count, ShotOptions shotOptions) throws StillException {
+        if (!Selection.validName(stem)) {
+            throw new StillException("bad_command", "bad still name: " + stem);
+        }
+        if (count < 1 || count > MAX_BURST) {
+            throw new StillException("bad_command", "a burst takes 1 to " + MAX_BURST + " frames, not " + count);
+        }
+        if (shotOptions.raw) {
+            throw new StillException("bad_command", "a burst takes no RAW");
+        }
+        if ((shotOptions.exposureNs > 0) != (shotOptions.iso > 0)) {
+            throw new StillException("bad_command", "a manual exposure needs both exposure_ns and iso");
+        }
+        Map<Long, Image> early = new HashMap<>(); // JPEGs that came before the frame they belong to was read
+        try {
+            checkDevice();
+            drainImages();
+            // in capture order: each frame's result, or why it failed
+            BlockingQueue<Object> done = new LinkedBlockingQueue<>();
+            long start = SystemClock.elapsedRealtime();
+            session.captureBurst(Collections.nCopies(count, stillRequest(shotOptions)), new CameraCaptureSession.CaptureCallback() {
+                @Override
+                public void onCaptureCompleted(CameraCaptureSession s, CaptureRequest request, TotalCaptureResult result) {
+                    done.add(result);
+                }
+
+                @Override
+                public void onCaptureFailed(CameraCaptureSession s, CaptureRequest request, CaptureFailure failure) {
+                    done.add(new StillException("capture_failed", "burst frame " + failure.getFrameNumber() + " failed (reason "
+                            + failure.getReason() + (failure.wasImageCaptured() ? ", image captured" : "") + ")"));
+                }
+
+                @Override
+                public void onCaptureBufferLost(CameraCaptureSession s, CaptureRequest request, Surface target, long frameNumber) {
+                    done.add(new StillException("buffer_lost", "JPEG buffer lost for frame " + frameNumber));
+                }
+            }, handler);
+            long deadline = start + SHOT_TIMEOUT_MS + (long) count * BURST_FRAME_TIMEOUT_MS;
+            JSONArray frames = new JSONArray();
+            for (int i = 0; i < count; ++i) {
+                long remaining = deadline - SystemClock.elapsedRealtime();
+                Object next = remaining > 0 ? done.poll(remaining, TimeUnit.MILLISECONDS) : null;
+                if (next == null) {
+                    checkDevice();
+                    throw new StillException("timeout", "burst frame " + (i + 1) + " of " + count + " did not complete in time");
+                }
+                if (next instanceof StillException) {
+                    throw (StillException) next;
+                }
+                TotalCaptureResult result = (TotalCaptureResult) next;
+                long resultMs = SystemClock.elapsedRealtime() - start;
+                Image image = takeImage(images, early, result.get(CaptureResult.SENSOR_TIMESTAMP), deadline, "JPEG");
+                File file = new File(options.dir, String.format(Locale.ROOT, "%s-f%02d.jpg", stem, i));
+                long writeStart = SystemClock.elapsedRealtime();
+                JSONObject frame = new JSONObject();
+                try {
+                    Protocol.put(frame, "width", image.getWidth());
+                    Protocol.put(frame, "height", image.getHeight());
+                    Protocol.put(frame, "bytes", write(image, file));
+                } finally {
+                    image.close();
+                }
+                Protocol.put(frame, "file", file.getPath());
+                Protocol.put(frame, "result_ms", resultMs);
+                Protocol.put(frame, "write_ms", SystemClock.elapsedRealtime() - writeStart);
+                putResult(frame, result);
+                frames.put(frame);
+            }
+            JSONObject event = Protocol.event("burst", null);
+            Protocol.put(event, "count", count);
+            Protocol.put(event, "frames", frames);
+            Protocol.put(event, "latency_ms", SystemClock.elapsedRealtime() - start);
+            return event;
+        } catch (StillException e) {
+            throw e;
+        } catch (Exception e) {
+            throw wrap(e, "burst " + stem);
+        } finally {
+            for (Image image : early.values()) {
+                image.close();
+            }
+        }
+    }
+
+    /** The STILL_CAPTURE request of a shot: to the JPEG stream (and the RAW one when asked), 3A as the session holds it, its processing. */
+    private CaptureRequest stillRequest(ShotOptions shotOptions) throws StillException, CameraAccessException {
+        CaptureRequest.Builder builder = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
+        builder.addTarget(jpegReader.getSurface());
+        if (shotOptions.raw) {
+            builder.addTarget(rawReader.getSurface());
+        }
+        apply3A(builder, options.lock);
+        applyProcessing(builder, shotOptions);
+        builder.set(CaptureRequest.JPEG_QUALITY, (byte) 100);
+        builder.set(CaptureRequest.JPEG_ORIENTATION, 0);
+        builder.set(CaptureRequest.JPEG_THUMBNAIL_SIZE, new Size(0, 0));
+        return builder.build();
     }
 
     @Override
@@ -540,7 +642,7 @@ final class StillSession implements AutoCloseable {
     }
 
     private void createReaders(Size jpeg, Size preview) {
-        jpegReader = ImageReader.newInstance(jpeg.getWidth(), jpeg.getHeight(), ImageFormat.JPEG, 2);
+        jpegReader = ImageReader.newInstance(jpeg.getWidth(), jpeg.getHeight(), ImageFormat.JPEG, JPEG_BUFFERS);
         jpegReader.setOnImageAvailableListener(reader -> queue(reader, images, "JPEG"), handler);
         previewReader = ImageReader.newInstance(preview.getWidth(), preview.getHeight(), ImageFormat.YUV_420_888, 2);
         previewReader.setOnImageAvailableListener(reader -> {
@@ -703,18 +805,36 @@ final class StillSession implements AutoCloseable {
                 r.get(CaptureResult.CONTROL_AE_STATE)) + ", AWB " + CameraProbe.awbState(r.get(CaptureResult.CONTROL_AWB_STATE));
     }
 
-    private Image takeImage(BlockingQueue<Image> queue, Long timestamp, long deadline, String what) throws StillException, InterruptedException {
+    /**
+     * The image of the frame with `timestamp` (any, when null). Others that come first are closed (left over from an earlier failed
+     * shot), or, with `early`, kept there for the frames they belong to (a burst's).
+     */
+    private Image takeImage(BlockingQueue<Image> queue, Map<Long, Image> early, Long timestamp, long deadline, String what)
+            throws StillException, InterruptedException {
+        if (early != null && timestamp != null) {
+            Image kept = early.remove(timestamp);
+            if (kept != null) {
+                return kept;
+            }
+        }
         while (true) {
             long remaining = deadline - SystemClock.elapsedRealtime();
             Image image = remaining > 0 ? queue.poll(remaining, TimeUnit.MILLISECONDS) : null;
             if (image == null) {
                 checkDevice();
-                throw new StillException("timeout", "no " + what + " image arrived within " + SHOT_TIMEOUT_MS + " ms");
+                throw new StillException("timeout", "no " + what + " image arrived in time");
             }
             if (timestamp == null || image.getTimestamp() == timestamp) {
                 return image;
             }
-            image.close(); // left over from an earlier failed shot
+            if (early != null) {
+                Image replaced = early.put(image.getTimestamp(), image);
+                if (replaced != null) {
+                    replaced.close();
+                }
+            } else {
+                image.close();
+            }
         }
     }
 

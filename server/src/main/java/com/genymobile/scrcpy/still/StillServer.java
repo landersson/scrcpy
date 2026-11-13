@@ -28,12 +28,12 @@ import java.nio.charset.StandardCharsets;
  * CLASSPATH=/data/local/tmp/phonecap-still-server.jar app_process / com.genymobile.scrcpy.still.StillServer serve
  * </pre>
  * "probe" prints one {"event":"camera"} line per camera and exits; it opens no camera. "serve" prints {"event":"hello"}, then reads one
- * JSON command per line on stdin (open, shoot, ping, close) and answers each with one JSON line on stdout (ready, shot, pong, closed or
- * error) carrying the command's id. Stdin EOF closes the camera and exits; so does a long idle period.
+ * JSON command per line on stdin (open, shoot, burst, ping, close) and answers each with one JSON line on stdout (ready, shot, burst,
+ * pong, closed or error) carrying the command's id. Stdin EOF closes the camera and exits; so does a long idle period.
  */
 public final class StillServer {
 
-    static final int PROTOCOL = 3; // 2: shoot takes noise_reduction, edge, exposure_ns + iso and raw; 3: open takes ois
+    static final int PROTOCOL = 4; // 2: shoot takes noise_reduction, edge, exposure_ns + iso and raw; 3: open takes ois; 4: burst
     private static final int IDLE_TIMEOUT_S = 300;
     private static final int EXIT_USAGE = 2;
     private static final int EXIT_IDLE = 3;
@@ -171,6 +171,14 @@ public final class StillServer {
                     JSONObject shot = session.shoot(command.getString("name"), StillSession.ShotOptions.fromJson(command));
                     Protocol.put(shot, "id", id);
                     Protocol.send(shot);
+                    return session;
+                case "burst":
+                    if (session == null) {
+                        throw new StillException("bad_command", "no camera is open (send open first)");
+                    }
+                    JSONObject burst = session.burst(command.getString("name"), command.getInt("count"), StillSession.ShotOptions.fromJson(command));
+                    Protocol.put(burst, "id", id);
+                    Protocol.send(burst);
                     return session;
                 case "close":
                     if (session != null) {
