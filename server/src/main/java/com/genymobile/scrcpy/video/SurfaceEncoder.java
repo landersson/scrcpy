@@ -74,7 +74,10 @@ public class SurfaceEncoder implements AsyncProcessor {
     private void streamCapture() throws IOException, ConfigurationException {
         Codec codec = streamer.getCodec();
         MediaCodec mediaCodec = createMediaCodec(codec, encoderName);
-        MediaFormat format = createFormat(codec.getMimeType(), videoBitRate, maxFps, codecOptions);
+        // a camera delivers frames by itself: a repeat would stand in for a late camera frame with the
+        // previous picture and a new timestamp, and a recording's frame times are what it is measured by
+        boolean repeatFrames = !(capture instanceof CameraCapture);
+        MediaFormat format = createFormat(codec.getMimeType(), videoBitRate, maxFps, codecOptions, repeatFrames);
 
         MediaCodecInfo.VideoCapabilities caps;
         int alignment;
@@ -316,7 +319,8 @@ public class SurfaceEncoder implements AsyncProcessor {
         }
     }
 
-    private static MediaFormat createFormat(String videoMimeType, int bitRate, float maxFps, List<CodecOption> codecOptions) {
+    private static MediaFormat createFormat(String videoMimeType, int bitRate, float maxFps, List<CodecOption> codecOptions,
+            boolean repeatFrames) {
         MediaFormat format = new MediaFormat();
         format.setString(MediaFormat.KEY_MIME, videoMimeType);
         format.setInteger(MediaFormat.KEY_BIT_RATE, bitRate);
@@ -327,8 +331,10 @@ public class SurfaceEncoder implements AsyncProcessor {
             format.setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED);
         }
         format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, DEFAULT_I_FRAME_INTERVAL);
-        // display the very first frame, and recover from bad quality when no new frames
-        format.setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, REPEAT_FRAME_DELAY_US); // µs
+        if (repeatFrames) {
+            // display the very first frame, and recover from bad quality when no new frames
+            format.setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, REPEAT_FRAME_DELAY_US); // µs
+        }
         if (Build.VERSION.SDK_INT >= AndroidVersions.API_23_ANDROID_6_0) {
             // real-time priority
             format.setInteger(MediaFormat.KEY_PRIORITY, 0);
